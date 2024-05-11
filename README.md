@@ -17,7 +17,7 @@ Prompt: cinematic photo breathtaking natural landscape with majestic snowcapped 
 
 Negative: drawing, painting, crayon, sketch, graphite, impressionist, noisy, blurry, soft, deformed, uglycartoon, drawing, sketch, 2d
 
-![](example.png "30/10 steps")
+![](example.png "20/10 steps")
 
 ---
 To do?:
