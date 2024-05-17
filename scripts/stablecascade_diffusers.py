@@ -56,7 +56,7 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, prior_step
     return f"Model: StableCascade\n{prompt_text}\n{generation_params_text}"
 
 
-def predict(modelP, modelD, positive_prompt, negative_prompt, width, height, guidance_scale,
+def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, height, guidance_scale,
             prior_steps, decoder_steps, seed, batch_size, PriorScheduler, style, i2iSource, i2iStrength):
 
     if style != 0:
@@ -82,7 +82,7 @@ def predict(modelP, modelD, positive_prompt, negative_prompt, width, height, gui
             variant="bf16",
             torch_dtype=torch.float32)
         with torch.no_grad():
-            image_embeds, neg_image_embeds = prior.encode_image(images=[i2iSource], device='cpu', dtype=torch.float32, batch_size=batch_size, num_images_per_prompt=1)
+            image_embeds, neg_image_embeds = prior.encode_image(images=[i2iSource], device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=batch_size)
             image_embeds = image_embeds * i2iStrength
             image_embeds = image_embeds.to('cuda').to(torch.float16) * i2iStrength
         del prior
@@ -90,45 +90,37 @@ def predict(modelP, modelD, positive_prompt, negative_prompt, width, height, gui
         image_embeds = None
     
 #cache embeds? not too slow
+#process on GPU?
 
-    useLitePrior = (modelP == 0)
-    useLiteDecoder = (modelD == 0)
-    usePatchedPrior = (modelP == 2)
+    useLitePrior = "lite" in priorModel
+    useLiteDecoder = "lite" in decoderModel
 
-    if useLitePrior:
-        dtype = torch.float16
+    dtype = torch.float16
+    if priorModel == "lite":
         prior_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
             local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder="prior_lite",
             variant="bf16", torch_dtype=dtype)
-        prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
+    elif priorModel == "full":
+        prior_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
             local_files_only=False, cache_dir=".//models//diffusers//",
-            image_encoder=None, feature_extractor=None, prior=prior_unet,
+            subfolder="prior",
             variant="bf16", torch_dtype=dtype)
     else:
-        if usePatchedPrior: # this seems to be non-deterministic
-            dtype = torch.float16
-            prior_unet = StableCascadeUNet.from_single_file(".//models//diffusers//fp16_stage_c_fp16_fixed.safetensors",
-                local_files_only=True, cache_dir=".//models//diffusers//",
-                torch_dtype=torch.float16)
-            prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
-                local_files_only=False, cache_dir=".//models//diffusers//",
-                image_encoder=None, feature_extractor=None,
-                prior=prior_unet,
-                variant="bf16",
-                torch_dtype=dtype)
-        else:
-            dtype = torch.float16
-            prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
-                local_files_only=False, cache_dir=".//models//diffusers//",
-                image_encoder=None, feature_extractor=None,
-                variant="bf16",
-                torch_dtype=dtype)
+        prior_unet = StableCascadeUNet.from_single_file(".//models//diffusers//StableCascadeCustom//StageC//" + priorModel,
+            local_files_only=True, cache_dir=".//models//diffusers//StableCascadeCustom//StageC//",
+            torch_dtype=dtype)
+        
+    prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
+        local_files_only=False, cache_dir=".//models//diffusers//",
+        image_encoder=None, feature_extractor=None,
+        prior=prior_unet,
+        variant="bf16", torch_dtype=dtype)
 
-
-#    prior.enable_model_cpu_offload()
-    prior.enable_attention_slicing("max")#'max' makes minimal/no difference?
-    prior.enable_sequential_cpu_offload()
+    prior.to('cuda')
+    prior.enable_attention_slicing("max")
+    if useLitePrior == False:
+        prior.enable_sequential_cpu_offload()  #good for full on 8GB, but slows down lite significantly?
 
     generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
 
@@ -146,9 +138,11 @@ def predict(modelP, modelD, positive_prompt, negative_prompt, width, height, gui
 #    prior.resolution_multiple = resolution
 
     prior_output = prior(
-        image_embeds=image_embeds,
         prompt=positive_prompt,
         negative_prompt=negative_prompt,
+
+        image_embeds=image_embeds,
+
         width=width,
         height=height,
         guidance_scale=guidance_scale,
@@ -157,41 +151,61 @@ def predict(modelP, modelD, positive_prompt, negative_prompt, width, height, gui
         generator=generator
     )
 
-    del generator, prior
+    prompt_embeds = prior_output.get("prompt_embeds", None)
+    prompt_embeds_pooled = prior_output.get("prompt_embeds_pooled", None)
+    negative_prompt_embeds = prior_output.get("negative_prompt_embeds", None)
+    negative_prompt_embeds_pooled = prior_output.get("negative_prompt_embeds_pooled", None)
+
+    del prior
 
     gc.collect()
     torch.cuda.empty_cache()
 
     dtype = torch.float16
 
-#   is no decoder stage possible - straight to VAE?
-
-#try without text_encoder/tokenizer, send no prompts
-    if useLiteDecoder:
+    if decoderModel == "lite":
         decoder_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
             local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder="decoder_lite", variant="bf16", torch_dtype=dtype)
-        decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
+    elif decoderModel == "full":
+        decoder_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
             local_files_only=False, cache_dir=".//models//diffusers//",
-            decoder=decoder_unet, variant="bf16", torch_dtype=dtype)
+            subfolder="decoder", variant="bf16", torch_dtype=dtype)
     else:
-        decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            variant="bf16", torch_dtype=dtype)
-    decoder.enable_model_cpu_offload()
-#    decoder.enable_sequential_cpu_offload() 
- 
+        decoder_unet = StableCascadeUNet.from_single_file(".//models//diffusers//StableCascadeCustom//StageB//" + decoderModel, 
+            local_files_only=True, cache_dir=".//models//diffusers//StableCascadeCustom//StageB//",
+            subfolder="decoder", torch_dtype=dtype)
+
+    decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
+        local_files_only=False, cache_dir=".//models//diffusers//",
+        tokenizer=None, text_encoder=None,
+        decoder=decoder_unet, variant="bf16", torch_dtype=dtype)
+
+    decoder.to('cuda')
+    decoder.enable_attention_slicing("max")
+    if useLiteDecoder == False:
+#        decoder.enable_sequential_cpu_offload()  #necessary?
+        decoder.enable_model_cpu_offload()
 
     decoder_output = decoder(
         image_embeddings=prior_output.image_embeddings.to(torch.float16),
-        prompt=positive_prompt,
-        negative_prompt=negative_prompt,
-        guidance_scale=1.1, #   if 0, non-deterministic results with lite. large: non-deterministic anyway
+        prompt_embeds = prompt_embeds,
+        prompt_embeds_pooled = prompt_embeds_pooled,
+        negative_prompt_embeds = negative_prompt_embeds,
+        negative_prompt_embeds_pooled = negative_prompt_embeds_pooled,
+        prompt=None,
+        negative_prompt=None,
+##        prompt=positive_prompt,
+##        negative_prompt=negative_prompt,
+        guidance_scale=1.1,
         output_type="pil",
         num_inference_steps=decoder_steps,
+        generator=generator,    #results non-deterministic
     ).images
 
-    del decoder, prior_output
+    del prior_output, prompt_embeds, prompt_embeds_pooled, negative_prompt_embeds, negative_prompt_embeds_pooled
+    del generator, decoder
+
     gc.collect()
     torch.cuda.empty_cache()
 
@@ -212,6 +226,10 @@ def predict(modelP, modelD, positive_prompt, negative_prompt, width, height, gui
         )
         fixed_seed += 1
 
+    gc.collect()
+    torch.cuda.empty_cache()
+
+
     return result, gr.Button.update(value='Generate', variant='primary', interactive=True)
 
 def on_ui_tabs():
@@ -221,17 +239,27 @@ def on_ui_tabs():
                    "Cinematic", "Photographic",
                    "Anime", "Manga",
                    "Digital art", "Pixel art",
-                   "Fantasy art", "Neonpunk", "3D model"
+                   "Fantasy art", "Neonpunk", "3D model",
                   ]
 
     models_list_P = ["lite",
                      "full",
-                     "fp16 full"]
+                     ]
 
     models_list_D = ["lite",
                      "full",
-#                     "none",
                      ]
+
+    import glob
+    customC = glob.glob(".\models\diffusers\StableCascadeCustom\StageC\*.safetensors")
+    customB = glob.glob(".\models\diffusers\StableCascadeCustom\StageB\*.safetensors")
+
+    for i in customC:
+        models_list_P.append(i.split('\\')[-1])
+
+    for i in customB:
+        models_list_D.append(i.split('\\')[-1])
+
 
     def getGalleryIndex (evt: gr.SelectData):
         CascadeMemory.galleryIndex = evt.index
@@ -272,8 +300,8 @@ def on_ui_tabs():
         with ResizeHandleRow():
             with gr.Column():
                 with gr.Row():
-                    modelP = gr.Dropdown(models_list_P, label='Model (Prior)', value="lite", type='index', scale=1)
-                    modelD = gr.Dropdown(models_list_D, label='Model (Decoder)', value="lite", type='index', scale=1)
+                    modelP = gr.Dropdown(models_list_P, label='Model (Prior)', value="lite", type='value', scale=1)
+                    modelD = gr.Dropdown(models_list_D, label='Model (Decoder)', value="lite", type='value', scale=1)
                     schedulerP = gr.Dropdown(["default",
                                              "DPM++ 2M",
                                              "DPM++ 2M SDE",
