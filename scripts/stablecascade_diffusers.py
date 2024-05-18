@@ -70,6 +70,11 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     fixed_seed = get_fixed_seed(seed)
     CascadeMemory.lastSeed = fixed_seed
 
+    useLitePrior = "lite" in priorModel
+    useLiteDecoder = "lite" in decoderModel
+
+    dtype = torch.bfloat16 if torch.cuda.is_bf16_supported() == True else torch.float16
+
     if i2iSource != None:
         i2iSource = i2iSource.resize([width, height])
         prior = StableCascadePriorPipeline.from_pretrained(
@@ -84,18 +89,14 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         with torch.no_grad():
             image_embeds, neg_image_embeds = prior.encode_image(images=[i2iSource], device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=batch_size)
             image_embeds = image_embeds * i2iStrength
-            image_embeds = image_embeds.to('cuda').to(torch.float16) * i2iStrength
+            image_embeds = image_embeds.to('cuda').to(dtype)
         del prior
     else:
         image_embeds = None
     
-#cache embeds? not too slow
+#cache embeds? not slow enough to concern
 #process on GPU?
 
-    useLitePrior = "lite" in priorModel
-    useLiteDecoder = "lite" in decoderModel
-
-    dtype = torch.float16
     if priorModel == "lite":
         prior_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
             local_files_only=False, cache_dir=".//models//diffusers//",
@@ -118,11 +119,9 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         variant="bf16", torch_dtype=dtype)
 
     prior.to('cuda')
-    prior.enable_attention_slicing("max")
+    prior.enable_attention_slicing()
     if useLitePrior == False:
         prior.enable_sequential_cpu_offload()  #good for full on 8GB, but slows down lite significantly?
-
-    generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
 
     if PriorScheduler == 'DPM++ 2M':
         prior.scheduler = DPMSolverMultistepScheduler.from_config(prior.scheduler.config)
@@ -130,12 +129,14 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         prior.scheduler = DPMSolverMultistepScheduler.from_config(prior.scheduler.config, algorithm_type='sde-dpmsolver++')
     elif PriorScheduler == "SA-solver":
         prior.scheduler = SASolverScheduler.from_config(prior.scheduler.config, algorithm_type='data_prediction')
-#   else use default
+####   else use default
     
     prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
     prior.scheduler.config.clip_sample = False
 
 #    prior.resolution_multiple = resolution
+
+    generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
 
     prior_output = prior(
         prompt=positive_prompt,
@@ -156,12 +157,10 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     negative_prompt_embeds = prior_output.get("negative_prompt_embeds", None)
     negative_prompt_embeds_pooled = prior_output.get("negative_prompt_embeds_pooled", None)
 
-    del prior
+    del prior, generator
 
     gc.collect()
     torch.cuda.empty_cache()
-
-    dtype = torch.float16
 
     if decoderModel == "lite":
         decoder_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
@@ -182,25 +181,26 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         decoder=decoder_unet, variant="bf16", torch_dtype=dtype)
 
     decoder.to('cuda')
-    decoder.enable_attention_slicing("max")
+    decoder.enable_attention_slicing()
     if useLiteDecoder == False:
 #        decoder.enable_sequential_cpu_offload()  #necessary?
         decoder.enable_model_cpu_offload()
 
+    ##  regenerate the Generator, needed for deterministic outputs - reusing from earlier doesn't
+    generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
+
     decoder_output = decoder(
-        image_embeddings=prior_output.image_embeddings.to(torch.float16),
+        image_embeddings=prior_output.image_embeddings.to(dtype),
         prompt_embeds = prompt_embeds,
         prompt_embeds_pooled = prompt_embeds_pooled,
         negative_prompt_embeds = negative_prompt_embeds,
         negative_prompt_embeds_pooled = negative_prompt_embeds_pooled,
         prompt=None,
         negative_prompt=None,
-##        prompt=positive_prompt,
-##        negative_prompt=negative_prompt,
         guidance_scale=1.1,
         output_type="pil",
         num_inference_steps=decoder_steps,
-        generator=generator,    #results non-deterministic
+        generator=generator,
     ).images
 
     del prior_output, prompt_embeds, prompt_embeds_pooled, negative_prompt_embeds, negative_prompt_embeds_pooled
@@ -229,8 +229,8 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     gc.collect()
     torch.cuda.empty_cache()
 
-
     return result, gr.Button.update(value='Generate', variant='primary', interactive=True)
+
 
 def on_ui_tabs():
     from modules.ui_components import ToolButton                                                     
@@ -241,25 +241,26 @@ def on_ui_tabs():
                    "Digital art", "Pixel art",
                    "Fantasy art", "Neonpunk", "3D model",
                   ]
+    def buildModelsLists ():
+        prior = ["lite", "full"]
+        decoder = ["lite", "full"]
+        
+        import glob
+        customStageC = glob.glob(".\models\diffusers\StableCascadeCustom\StageC\*.safetensors")
+        customStageB = glob.glob(".\models\diffusers\StableCascadeCustom\StageB\*.safetensors")
 
-    models_list_P = ["lite",
-                     "full",
-                     ]
+        for i in customStageC:
+            prior.append(i.split('\\')[-1])
 
-    models_list_D = ["lite",
-                     "full",
-                     ]
+        for i in customStageB:
+            decoder.append(i.split('\\')[-1])
+        return prior, decoder
 
-    import glob
-    customC = glob.glob(".\models\diffusers\StableCascadeCustom\StageC\*.safetensors")
-    customB = glob.glob(".\models\diffusers\StableCascadeCustom\StageB\*.safetensors")
+    models_list_P, models_list_D = buildModelsLists ()
 
-    for i in customC:
-        models_list_P.append(i.split('\\')[-1])
-
-    for i in customB:
-        models_list_D.append(i.split('\\')[-1])
-
+    def refreshModels ():
+        prior, decoder = buildModelsLists ()
+        return gr.Dropdown.update(choices=prior), gr.Dropdown.update(choices=decoder)
 
     def getGalleryIndex (evt: gr.SelectData):
         CascadeMemory.galleryIndex = evt.index
@@ -301,6 +302,7 @@ def on_ui_tabs():
             with gr.Column():
                 with gr.Row():
                     modelP = gr.Dropdown(models_list_P, label='Model (Prior)', value="lite", type='value', scale=1)
+                    refresh = ToolButton(value='\U0001f504')
                     modelD = gr.Dropdown(models_list_D, label='Model (Decoder)', value="lite", type='value', scale=1)
                     schedulerP = gr.Dropdown(["default",
                                              "DPM++ 2M",
@@ -354,7 +356,7 @@ def on_ui_tabs():
                         paste_button=button, tabname=tabname, source_text_component=prompt, source_image_component=output_gallery,
                     ))
 
-
+        refresh.click(refreshModels, inputs=[], outputs=[modelP, modelD])
         karras.click(toggleKarras, inputs=[], outputs=karras)
         swapper.click(fn=None, _js="function(){switchWidthHeight('StableCascade')}", inputs=None, outputs=None, show_progress=False)
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
