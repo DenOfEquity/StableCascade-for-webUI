@@ -4,16 +4,19 @@ I don't think there is anything Forge specific here.
 ### works for me <Sup>TM</sup> on 8Gb VRAM, 16Gb RAM (GTX1070) ###
 
 ---
-### 17/05/2024 ###
-Custom singlefile checkpoints will be searched on startup in `models\diffusers\StableCascadeCustom\StageC` and `models\diffusers\StableCascadeCustom\StageB`. There are a handful of these on civitAI: countersushi is a lite stage C model that seems to show considerable improvement over the base. The full models require bfloat16, so don't work for me (black images only).
-If you use the fixed fp16 prior, you'll need to move it into the custom stageC directory.
+#### 25/05/2024 ####
+Fixed get image source from gallery, fixed batch size for image source, add model details to infotext.
 
-### 18/05/2024 ###
+#### 18/05/2024 ####
 Added a refresh button to recheck custom checkpoints
 
 Added check for bfloat16 support, and uses it if available. Otherwise, float16 as before. Previously, forcing float16 meant that the original full stage C model wouldn't work for anyone. I can't fully test this, but it does correctly fall back to float16 for me.
 
 Seem to have made generations fully deterministic by regenerating the Generator.
+
+#### 17/05/2024 ####
+Custom singlefile checkpoints will be searched on startup in `models\diffusers\StableCascadeCustom\StageC` and `models\diffusers\StableCascadeCustom\StageB`. There are a handful of these on civitAI: countersushi is a lite stage C model that seems to show considerable improvement over the base. The full models require bfloat16, so don't work for me (black images only).
+If you use the fixed fp16 prior, you'll need to move it into the custom stageC directory.
 
 ---
 ![](screenshot.png "image of extension UI")
