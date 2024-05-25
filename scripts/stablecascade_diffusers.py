@@ -35,7 +35,7 @@ def quote(text):
     return json.dumps(text, ensure_ascii=False)
 
 # modules/processing.py
-def create_infotext(positive_prompt, negative_prompt, guidance_scale, prior_steps, decoder_steps, seed, scheduler, width, height, ):
+def create_infotext(priorModel, decoderModel, positive_prompt, negative_prompt, guidance_scale, prior_steps, decoder_steps, seed, scheduler, width, height, ):
     karras = " : Karras" if CascadeMemory.karras == True else ""
     generation_params = {
         "Size": f"{width}x{height}",
@@ -43,21 +43,23 @@ def create_infotext(positive_prompt, negative_prompt, guidance_scale, prior_step
         "Scheduler": f"{scheduler}{karras}",
         "Steps(Prior/Decoder)": f"{prior_steps}/{decoder_steps}",
         "CFG": guidance_scale,
-        "RNG": opts.randn_source if opts.randn_source != "GPU" else None
+        "RNG": opts.randn_source if opts.randn_source != "GPU" else None,
     }
 
-#add model details
 #add i2i marker?
-    prompt_text = f"Prompt: {positive_prompt}\n"
+    model_text = "(" + priorModel.split('.')[0] + "/" + decoderModel.split('.')[0] + ")"
+    
+    prompt_text = f"Prompt: {positive_prompt}"
     if negative_prompt != "":
-        prompt_text += (f"Negative: {negative_prompt}\n")
+        prompt_text += (f"\nNegative: {negative_prompt}")
     generation_params_text = ", ".join([k if k == v else f'{k}: {quote(v)}' for k, v in generation_params.items() if v is not None])
 
-    return f"Model: StableCascade\n{prompt_text}\n{generation_params_text}"
+    return f"Model: StableCascade {model_text}\n{prompt_text}\n{generation_params_text}"
 
 
 def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, height, guidance_scale,
-            prior_steps, decoder_steps, seed, batch_size, PriorScheduler, style, i2iSource, i2iStrength):
+            prior_steps, decoder_steps, seed, batch_size, PriorScheduler, style, i2iSource, i2iStrength,):
+            #resolution, latentScale):
 
     if style != 0:
         positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
@@ -87,7 +89,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
             variant="bf16",
             torch_dtype=torch.float32)
         with torch.no_grad():
-            image_embeds, neg_image_embeds = prior.encode_image(images=[i2iSource], device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=batch_size)
+            image_embeds, neg_image_embeds = prior.encode_image(images=[i2iSource], device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=1)
             image_embeds = image_embeds * i2iStrength
             image_embeds = image_embeds.to('cuda').to(dtype)
         del prior
@@ -111,12 +113,17 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         prior_unet = StableCascadeUNet.from_single_file(".//models//diffusers//StableCascadeCustom//StageC//" + priorModel,
             local_files_only=True, cache_dir=".//models//diffusers//StableCascadeCustom//StageC//",
             torch_dtype=dtype)
-        
+
+
+    #auto calc resolution_multiple based on shortest dimension?
+#    resolution = min(width, height) / 24
+
     prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
         local_files_only=False, cache_dir=".//models//diffusers//",
         image_encoder=None, feature_extractor=None,
         prior=prior_unet,
-        variant="bf16", torch_dtype=dtype)
+        variant="bf16", torch_dtype=dtype,)
+#        resolution_multiple = resolution)
 
     prior.to('cuda')
     prior.enable_attention_slicing()
@@ -133,8 +140,6 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     
     prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
     prior.scheduler.config.clip_sample = False
-
-#    prior.resolution_multiple = resolution
 
     generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
 
@@ -178,7 +183,8 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
         local_files_only=False, cache_dir=".//models//diffusers//",
         tokenizer=None, text_encoder=None,
-        decoder=decoder_unet, variant="bf16", torch_dtype=dtype)
+        decoder=decoder_unet, variant="bf16", torch_dtype=dtype,)
+        #latent_dim_scale = latentScale)
 
     decoder.to('cuda')
     decoder.enable_attention_slicing()
@@ -186,7 +192,8 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
 #        decoder.enable_sequential_cpu_offload()  #necessary?
         decoder.enable_model_cpu_offload()
 
-    ##  regenerate the Generator, needed for deterministic outputs - reusing from earlier doesn't
+    ##  regenerate the Generator, needed for deterministic outputs - reusing from earlier doesn't work
+        #still not correct with custom checkpoint?
     generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
 
     decoder_output = decoder(
@@ -212,7 +219,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     result = []
 
     for image in decoder_output:
-        info=create_infotext(positive_prompt, negative_prompt, guidance_scale, prior_steps, decoder_steps, fixed_seed,
+        info=create_infotext(priorModel, decoderModel, positive_prompt, negative_prompt, guidance_scale, prior_steps, decoder_steps, fixed_seed,
                              PriorScheduler, width, height)
         result.append((image, info))
         images.save_image(
@@ -271,17 +278,16 @@ def on_ui_tabs():
     def randomSeed ():
         return -1
 
-    def i2iSetDimensions (image):
-        #must be x128 to be safe, should also resize image
-        w = 128 * (image.size[0] // 128)
-        h = 128 * (image.size[1] // 128)
+    def i2iSetDimensions (image, w, h):
+        #must be x128 to be safe, image will be resized to set width/height later
         if image is not None:
-            return [w, h]
-
+            w = 128 * (image.size[0] // 128)
+            h = 128 * (image.size[1] // 128)
+        return [w, h]
 
     def i2iImageFromGallery (gallery):
         try:
-            newImage = gallery[PixArtStorage.galleryIndex][0]['name'].split('?')
+            newImage = gallery[CascadeMemory.galleryIndex][0]['name'].split('?')
             return newImage[0]
         except:
             return None
@@ -326,11 +332,14 @@ def on_ui_tabs():
                     prior_step = gr.Slider(label='Steps (Prior)', minimum=1, maximum=60, step=1, value=20)
                     decoder_steps = gr.Slider(label='Steps (Decoder)', minimum=1, maximum=20, step=1, value=10)
                 with gr.Row():
-#                    resolution = gr.Slider(label='Resolution multiple', minimum=16, maximum=96, step=1, value=42)
                     sampling_seed = gr.Number(label='Seed', value=-1, precision=0, scale=2)
                     random = ToolButton(value="\U0001f3b2\ufe0f")
                     reuseSeed = ToolButton(value="\u267b\ufe0f")
                     batch_size = gr.Number(label='Batch Size', minimum=1, maximum=9, value=1, precision=0, scale=0)
+#                with gr.Row():
+#                    resolution = gr.Slider(label='Resolution multiple (prior)', minimum=32, maximum=64, step=0.01, value=42.67)
+#                    latentScale = gr.Slider(label='Latent scale (VAE)', minimum=6, maximum=16, step=0.01, value=10.67)
+
 
                 with gr.Accordion(label='Image prompt', open=False):
                     with gr.Row():
@@ -342,11 +351,12 @@ def on_ui_tabs():
 
 
                 ctrls = [modelP, modelD, prompt, negative_prompt, width, height, guidance_scale, prior_step, decoder_steps,
-                         sampling_seed, batch_size, schedulerP, style, i2iSource, i2iStrength]
+                         sampling_seed, batch_size, schedulerP, style, i2iSource, i2iStrength]#, resolution, latentScale]
 
             with gr.Column():
                 generate_button = gr.Button(value="Generate", variant='primary')
-                output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None, show_label=False, object_fit='contain', visible=True, columns=3, preview=True)
+                output_gallery = gr.Gallery(label='Output', height=shared.opts.gallery_height or None, show_label=False,
+                                            object_fit='contain', visible=True, columns=3, preview=True)
                 
                 with gr.Row():
                     buttons = parameters_copypaste.create_buttons(["img2img", "inpaint", "extras"])
@@ -362,7 +372,7 @@ def on_ui_tabs():
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
 
-        i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource], outputs=[width, height], show_progress=False)
+        i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource, width, height], outputs=[width, height], show_progress=False)
         i2iFromGallery.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource])
 
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
