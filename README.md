@@ -7,6 +7,8 @@ I don't think there is anything Forge specific here.
 ## Install ##
 Go to the **Extensions** tab, then **Install from URL**, use the URL for this repository.
 
+In the ```forge/webui``` directory there is a file called ```requirements_versions.txt```, look for the line ```diffusers==0.25.0``` (probably the last line) and edit it to ```diffusers>=0.28.1```. If the line doesn't exist, just add it. Fully restart Forge. On start, Forge will install the newer version.
+
 ---
 #### 25/05/2024 ####
 Fixed get image source from gallery, fixed batch size for image source, add model details to infotext.
