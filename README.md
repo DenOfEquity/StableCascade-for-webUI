@@ -10,6 +10,12 @@ Go to the **Extensions** tab, then **Install from URL**, use the URL for this re
 In the ```forge/webui``` directory there is a file called ```requirements_versions.txt```, look for the line ```diffusers==0.25.0``` (probably the last line) and edit it to ```diffusers>=0.28.1```. If the line doesn't exist, just add it. Fully restart Forge. On start, Forge will install the newer version.
 
 ---
+#### 07/06/2024 ####
+fix for CFG 1: previously decoder stage had guidance set to 1.1 and would error. Now decoder stage uses guidance 1 (no significant difference to results).
+
+updated handling for custom models to work with updated diffusers. *from_single_file* was overhauled and the new implemention needs model configs passed to it, otherwise it fails. Doesn't fail on first run though, that would be too easy to spot. Why not just stick to diffusers 0.27 for now?  Because PixArt needs 0.28.0, Hunyuan-DiT needs 0.28.1, and I want to run all in one Forge install.
+
+
 #### 25/05/2024 ####
 Fixed get image source from gallery, fixed batch size for image source, add model details to infotext.
 

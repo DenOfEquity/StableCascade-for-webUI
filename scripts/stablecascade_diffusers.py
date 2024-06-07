@@ -110,9 +110,15 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
             subfolder="prior",
             variant="bf16", torch_dtype=dtype)
     else:
-        prior_unet = StableCascadeUNet.from_single_file(".//models//diffusers//StableCascadeCustom//StageC//" + priorModel,
-            local_files_only=True, cache_dir=".//models//diffusers//StableCascadeCustom//StageC//",
-            torch_dtype=dtype)
+    #only works once !?! then starts looking for config.json
+        customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + priorModel
+        prior_unet = StableCascadeUNet.from_single_file(
+            customStageC,
+            local_files_only=True, cache_dir=".//models//diffusers//",
+            use_safetensors=True,
+            subfolder="prior_lite" if "lite" in priorModel else "prior",
+            torch_dtype=dtype,
+            config="stabilityai/stable-cascade-prior")
 
 
     #auto calc resolution_multiple based on shortest dimension?
@@ -124,6 +130,8 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         prior=prior_unet,
         variant="bf16", torch_dtype=dtype,)
 #        resolution_multiple = resolution)
+
+    del prior_unet
 
     prior.to('cuda')
     prior.enable_attention_slicing()
@@ -141,7 +149,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
     prior.scheduler.config.clip_sample = False
 
-    generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
+    generator = [torch.Generator(device="cpu").manual_seed(fixed_seed+i) for i in range(batch_size)]
 
     prior_output = prior(
         prompt=positive_prompt,
@@ -176,15 +184,21 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
             local_files_only=False, cache_dir=".//models//diffusers//",
             subfolder="decoder", variant="bf16", torch_dtype=dtype)
     else:
-        decoder_unet = StableCascadeUNet.from_single_file(".//models//diffusers//StableCascadeCustom//StageB//" + decoderModel, 
-            local_files_only=True, cache_dir=".//models//diffusers//StableCascadeCustom//StageB//",
-            subfolder="decoder", torch_dtype=dtype)
+        customStageB = ".//models//diffusers//StableCascadeCustom//StageB//" + decoderModel
+        decoder_unet = StableCascadeUNet.from_single_file(
+            customStageB,
+            local_files_only=True, cache_dir=".//models//diffusers//",
+            use_safetensors=True,
+            subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
+            config="stabilityai/stable-cascade")
 
     decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
         local_files_only=False, cache_dir=".//models//diffusers//",
         tokenizer=None, text_encoder=None,
         decoder=decoder_unet, variant="bf16", torch_dtype=dtype,)
         #latent_dim_scale = latentScale)
+
+    del decoder_unet
 
     decoder.to('cuda')
     decoder.enable_attention_slicing()
@@ -194,7 +208,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
 
     ##  regenerate the Generator, needed for deterministic outputs - reusing from earlier doesn't work
         #still not correct with custom checkpoint?
-    generator = [torch.Generator().manual_seed(fixed_seed+i) for i in range(batch_size)]
+    generator = [torch.Generator(device="cpu").manual_seed(fixed_seed+i) for i in range(batch_size)]
 
     decoder_output = decoder(
         image_embeddings=prior_output.image_embeddings.to(dtype),
@@ -211,7 +225,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     ).images
 
     del prior_output, prompt_embeds, prompt_embeds_pooled, negative_prompt_embeds, negative_prompt_embeds_pooled
-    del generator, decoder
+    del decoder, generator
 
     gc.collect()
     torch.cuda.empty_cache()
