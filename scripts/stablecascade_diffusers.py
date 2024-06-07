@@ -204,7 +204,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         negative_prompt_embeds_pooled = negative_prompt_embeds_pooled,
         prompt=None,
         negative_prompt=None,
-        guidance_scale=1.1,
+        guidance_scale=1,
         output_type="pil",
         num_inference_steps=decoder_steps,
         generator=generator,
