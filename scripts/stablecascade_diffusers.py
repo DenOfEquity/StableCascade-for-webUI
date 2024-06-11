@@ -6,7 +6,6 @@ from diffusers import StableCascadeDecoderPipeline, StableCascadePriorPipeline, 
 
 from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler
 from diffusers import SASolverScheduler
-from diffusers import EulerAncestralDiscreteScheduler, EulerDiscreteScheduler, UniPCMultistepScheduler
 
 from modules import ui_common
 
@@ -19,7 +18,8 @@ import modules.infotext_utils as parameters_copypaste
 
 torch.backends.cuda.enable_mem_efficient_sdp(True)
 
-import customStylesList as styles
+import customStylesListSC as styles
+import modelsListSC as models
 
 class CascadeMemory:
     lastSeed = -1
@@ -98,40 +98,43 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     
 #cache embeds? not slow enough to concern
 #process on GPU?
-
-    if priorModel == "lite":
-        prior_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
+    if priorModel in models.models_list_prior:
+        #   custom diffusers type
+        prior = StableCascadePriorPipeline.from_pretrained(
+            priorModel, 
             local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder="prior_lite",
-            variant="bf16", torch_dtype=dtype)
-    elif priorModel == "full":
-        prior_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder="prior",
-            variant="bf16", torch_dtype=dtype)
+            image_encoder=None, feature_extractor=None,
+            torch_dtype=dtype,)
     else:
-    #only works once !?! then starts looking for config.json
-        customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + priorModel
-        prior_unet = StableCascadeUNet.from_single_file(
-            customStageC,
-            local_files_only=True, cache_dir=".//models//diffusers//",
-            use_safetensors=True,
-            subfolder="prior_lite" if "lite" in priorModel else "prior",
-            torch_dtype=dtype,
-            config="stabilityai/stable-cascade-prior")
+        if priorModel == "lite":
+            prior_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder="prior_lite",
+                variant="bf16", torch_dtype=dtype)
+        elif priorModel == "full":
+            prior_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder="prior",
+                variant="bf16", torch_dtype=dtype)
+        else:# ".safetensors" in priorModel:
+            customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + priorModel
+            prior_unet = StableCascadeUNet.from_single_file(
+                customStageC,
+                local_files_only=True, cache_dir=".//models//diffusers//",
+                use_safetensors=True,
+                subfolder="prior_lite" if "lite" in priorModel else "prior",
+                torch_dtype=dtype,
+                config="stabilityai/stable-cascade-prior")
 
+#    resolution = min(width, height) / 24   #auto calc resolution_multiple based on shortest dimension?
+        prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
+            local_files_only=False, cache_dir=".//models//diffusers//",
+            image_encoder=None, feature_extractor=None,
+            prior=prior_unet,
+            variant="bf16", torch_dtype=dtype,)
+    #        resolution_multiple = resolution)
 
-    #auto calc resolution_multiple based on shortest dimension?
-#    resolution = min(width, height) / 24
-
-    prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
-        local_files_only=False, cache_dir=".//models//diffusers//",
-        image_encoder=None, feature_extractor=None,
-        prior=prior_unet,
-        variant="bf16", torch_dtype=dtype,)
-#        resolution_multiple = resolution)
-
-    del prior_unet
+        del prior_unet
 
     prior.to('cuda')
     prior.enable_attention_slicing()
@@ -144,6 +147,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
         prior.scheduler = DPMSolverMultistepScheduler.from_config(prior.scheduler.config, algorithm_type='sde-dpmsolver++')
     elif PriorScheduler == "SA-solver":
         prior.scheduler = SASolverScheduler.from_config(prior.scheduler.config, algorithm_type='data_prediction')
+
 ####   else use default
     
     prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
@@ -175,30 +179,39 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     gc.collect()
     torch.cuda.empty_cache()
 
-    if decoderModel == "lite":
-        decoder_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
+    if decoderModel in models.models_list_decoder:
+        #   custom diffusers type
+        decoder = StableCascadeDecoderPipeline.from_pretrained(
+            decoderModel, 
             local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder="decoder_lite", variant="bf16", torch_dtype=dtype)
-    elif decoderModel == "full":
-        decoder_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            subfolder="decoder", variant="bf16", torch_dtype=dtype)
+            tokenizer=None, text_encoder=None,
+            torch_dtype=dtype,)
+            #latent_dim_scale = latentScale)
     else:
-        customStageB = ".//models//diffusers//StableCascadeCustom//StageB//" + decoderModel
-        decoder_unet = StableCascadeUNet.from_single_file(
-            customStageB,
-            local_files_only=True, cache_dir=".//models//diffusers//",
-            use_safetensors=True,
-            subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
-            config="stabilityai/stable-cascade")
+        if decoderModel == "lite":
+            decoder_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder="decoder_lite", variant="bf16", torch_dtype=dtype)
+        elif decoderModel == "full":
+            decoder_unet = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder="decoder", variant="bf16", torch_dtype=dtype)
+        else:
+            customStageB = ".//models//diffusers//StableCascadeCustom//StageB//" + decoderModel
+            decoder_unet = StableCascadeUNet.from_single_file(
+                customStageB,
+                local_files_only=True, cache_dir=".//models//diffusers//",
+                use_safetensors=True,
+                subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
+                config="stabilityai/stable-cascade")
 
-    decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
-        local_files_only=False, cache_dir=".//models//diffusers//",
-        tokenizer=None, text_encoder=None,
-        decoder=decoder_unet, variant="bf16", torch_dtype=dtype,)
-        #latent_dim_scale = latentScale)
+        decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
+            local_files_only=False, cache_dir=".//models//diffusers//",
+            tokenizer=None, text_encoder=None,
+            decoder=decoder_unet, variant="bf16", torch_dtype=dtype,)
+            #latent_dim_scale = latentScale)
 
-    del decoder_unet
+        del decoder_unet
 
     decoder.to('cuda')
     decoder.enable_attention_slicing()
@@ -263,8 +276,8 @@ def on_ui_tabs():
                    "Fantasy art", "Neonpunk", "3D model",
                   ]
     def buildModelsLists ():
-        prior = ["lite", "full"]
-        decoder = ["lite", "full"]
+        prior = ["lite", "full"] + models.models_list_prior
+        decoder = ["lite", "full"] + models.models_list_decoder
         
         import glob
         customStageC = glob.glob(".\models\diffusers\StableCascadeCustom\StageC\*.safetensors")
@@ -325,9 +338,9 @@ def on_ui_tabs():
                     refresh = ToolButton(value='\U0001f504')
                     modelD = gr.Dropdown(models_list_D, label='Model (Decoder)', value="lite", type='value', scale=1)
                     schedulerP = gr.Dropdown(["default",
-                                             "DPM++ 2M",
-                                             "DPM++ 2M SDE",
-                                             "SA-solver",
+                                              "DPM++ 2M",
+                                              "DPM++ 2M SDE",
+                                              "SA-solver",
                                              ],
                         label='Sampler (Prior)', value="default", type='value', scale=1)
                     karras = ToolButton(value="\U0001D542", variant='secondary', tooltip="use Karras sigmas")

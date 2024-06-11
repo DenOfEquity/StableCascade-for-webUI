@@ -10,6 +10,9 @@ Go to the **Extensions** tab, then **Install from URL**, use the URL for this re
 In the ```forge/webui``` directory there is a file called ```requirements_versions.txt```, look for the line ```diffusers==0.25.0``` (probably the last line) and edit it to ```diffusers>=0.28.1```. If the line doesn't exist, just add it. Fully restart Forge. On start, Forge will install the newer version.
 
 ---
+#### 11/06/2024 ####
+Added support for custom Diffusers type checkpoints: edit *modelsListSC.py* in the extension directory. **SoteDiffusion** by [Disty](https://huggingface.co/Disty0) is included as an example (~8GB for prior and trained text encoder, ~3GB for (optional) decoder). It's a full model anime finetune, seems good, and has the extra bonus of working in float16. The styles list has an updated entry with the recommended prompt additions for this model - they seem necessary.
+
 #### 07/06/2024 ####
 fix for CFG 1: previously decoder stage had guidance set to 1.1 and would error. Now decoder stage uses guidance 1 (no significant difference to results).
 
