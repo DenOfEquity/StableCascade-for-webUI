@@ -11,7 +11,7 @@ In the ```forge/webui``` directory there is a file called ```requirements_versio
 
 ---
 #### 11/06/2024 ####
-Added support for custom Diffusers type checkpoints: edit *modelsListSC.py* in the extension directory. **SoteDiffusion** by [Disty](https://huggingface.co/Disty0) is included as an example (~8GB for prior and trained text encoder, ~3GB for (optional) decoder). It's a full model anime finetune, seems good, and has the extra bonus of working in float16. The styles list has an updated entry with the recommended prompt additions for this model - they seem necessary.
+Added support for custom Diffusers type checkpoints: edit *modelsListSC.py* in the extension directory. **SoteDiffusion** by [Disty](https://huggingface.co/Disty0) is included as an example (~8GB for prior and trained text encoder, ~3GB for (optional, but recommended) decoder). It's a full model anime finetune, seems good, and has the extra bonus of working in float16. The styles list has an updated entry with the suggested prompt additions for this model - they seem necessary.
 
 #### 07/06/2024 ####
 fix for CFG 1: previously decoder stage had guidance set to 1.1 and would error. Now decoder stage uses guidance 1 (no significant difference to results).
