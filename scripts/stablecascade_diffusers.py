@@ -158,7 +158,7 @@ def predict(priorModel, decoderModel, positive_prompt, negative_prompt, width, h
     if hasattr(prior.scheduler.config, 'use_karras_sigmas'):
         prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
 
-#    prior.scheduler.config.clip_sample = False
+    prior.scheduler.config.clip_sample = False
 
 
     with torch.inference_mode():
