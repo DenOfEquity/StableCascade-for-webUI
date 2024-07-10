@@ -10,6 +10,9 @@ Go to the **Extensions** tab, then **Install from URL**, use the URL for this re
 In the ```forge/webui``` directory there is a file called ```requirements_versions.txt```, look for the line ```diffusers==0.25.0``` (probably the last line) and edit it to ```diffusers>=0.28.1```. If the line doesn't exist, just add it. Fully restart Forge. On start, Forge will install the newer version.
 
 ---
+#### 10/07/2024 ####
+* improved yesterday's effort. More compatibility, multi-line, etc.
+
 #### 09/07/2024 ####
 * added prompt parsing to automatically fill in details like seed, steps, etc.
 
