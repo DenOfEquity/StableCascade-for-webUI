@@ -131,7 +131,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + priorModel
             prior_unet = StableCascadeUNet.from_single_file(
                 customStageC,
-                local_files_only=True, cache_dir=".//models//diffusers//",
+                local_files_only=False, cache_dir=".//models//diffusers//",
                 use_safetensors=True,
                 subfolder="prior_lite" if "lite" in priorModel else "prior",
                 torch_dtype=dtype,
@@ -216,7 +216,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             customStageB = ".//models//diffusers//StableCascadeCustom//StageB//" + decoderModel
             decoder_unet = StableCascadeUNet.from_single_file(
                 customStageB,
-                local_files_only=True, cache_dir=".//models//diffusers//",
+                local_files_only=False, cache_dir=".//models//diffusers//",
                 use_safetensors=True,
                 subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
                 config="stabilityai/stable-cascade")
