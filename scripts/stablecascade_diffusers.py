@@ -9,6 +9,7 @@ from modules.shared import opts
 from modules.ui_components import ResizeHandleRow
 import modules.infotext_utils as parameters_copypaste
 
+from transformers import T5TokenizerFast, T5ForConditionalGeneration
 from diffusers import StableCascadeDecoderPipeline, StableCascadePriorPipeline, StableCascadeUNet#, DDPMWuerstchenScheduler
 from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, SASolverScheduler
 from diffusers.pipelines.wuerstchen.modeling_paella_vq_model import PaellaVQModel
@@ -344,6 +345,42 @@ def on_ui_tabs():
     def i2iSwap (i1, i2):
         return i2, i1
 
+    def toggleSP ():
+        if not CascadeMemory.locked:
+            return gradio.Button.update(variant='primary')
+    def superPrompt (prompt, seed):
+        tokenizer = getattr (shared, 'SuperPrompt_tokenizer', None)
+        superprompt = getattr (shared, 'SuperPrompt_model', None)
+        if tokenizer is None:
+            tokenizer = T5TokenizerFast.from_pretrained(
+                'roborovski/superprompt-v1',
+                cache_dir='.//models//diffusers//',
+            )
+            shared.SuperPrompttokenizer = tokenizer
+        if superprompt is None:
+            superprompt = T5ForConditionalGeneration.from_pretrained(
+                'roborovski/superprompt-v1',
+                cache_dir='.//models//diffusers//',
+                device_map='auto',
+                torch_dtype=torch.float16
+            )
+            shared.SuperPrompt_model = superprompt
+            print("SuperPrompt-v1 model loaded successfully.")
+            if torch.cuda.is_available():
+                superprompt.to('cuda')
+
+        torch.manual_seed(get_fixed_seed(seed))
+        device = superprompt.device
+        systemprompt1 = "Expand the following prompt to add more detail: "
+        
+        input_ids = tokenizer(systemprompt1 + prompt, return_tensors="pt").input_ids.to(device)
+        outputs = superprompt.generate(input_ids, max_new_tokens=77, repetition_penalty=1.2, do_sample=True)
+        dirty_text = tokenizer.decode(outputs[0])
+        result = dirty_text.replace("<pad>", "").replace("</s>", "").strip()
+        
+        return gradio.Button.update(variant='secondary'), result
+
+
     def toggleKarras ():
         if not CascadeMemory.locked:
             CascadeMemory.karras ^= True
@@ -457,6 +494,7 @@ def on_ui_tabs():
                 with gradio.Row():
                     prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
                     parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
+                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
 
                 with gradio.Row():
                     negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=1.0)
@@ -505,6 +543,10 @@ def on_ui_tabs():
                     parameters_copypaste.register_paste_params_button(parameters_copypaste.ParamBinding(
                         paste_button=button, tabname=tabname, source_text_component=prompt, source_image_component=output_gallery,
                     ))
+
+        SP.click(toggleSP, inputs=[], outputs=SP)
+        SP.click(superPrompt, inputs=[prompt, sampling_seed], outputs=[SP, prompt])
+
         parse.click(parsePrompt, inputs=[prompt, negative_prompt, width, height, sampling_seed, schedulerP, prior_steps, decoder_steps, guidance_scale], outputs=[prompt, negative_prompt, width, height, sampling_seed, schedulerP, prior_steps, decoder_steps, guidance_scale], show_progress=False)
         refresh.click(refreshModels, inputs=[], outputs=[modelP, modelD])
         karras.click(toggleKarras, inputs=[], outputs=karras)
