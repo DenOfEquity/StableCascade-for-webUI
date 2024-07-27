@@ -1,7 +1,28 @@
+class CascadeMemory:
+    ModuleReload = False
+    noUnload = False
+    teCLIP = None
+    lastPrior = None
+    lastDecoder = None
+    lastTextEncoder = None
+    prior = None
+    decoder = None
+    lastSeed = -1
+    galleryIndex = 0
+    torchMessage = True     #   display information message about torch/bfloat16, set to False after first check
+    locked = False  #   for preventing changes to the following volatile state while generating
+    karras = False
+    embedsState = 0
+
 import gradio
 from PIL import Image
 import torch
 import gc
+try:
+    import reload
+    CascadeMemory.ModuleReload = True
+except:
+    CascadeMemory.ModuleReload = False
 
 from modules import script_callbacks, images, shared
 from modules.processing import get_fixed_seed
@@ -10,7 +31,8 @@ from modules.ui_components import ResizeHandleRow
 import modules.infotext_utils as parameters_copypaste
 
 from transformers import T5TokenizerFast, T5ForConditionalGeneration
-from diffusers import StableCascadeDecoderPipeline, StableCascadePriorPipeline, StableCascadeUNet#, DDPMWuerstchenScheduler
+from transformers import CLIPTextModelWithProjection, CLIPTokenizer
+from diffusers import StableCascadeDecoderPipeline, StableCascadeUNet#, DDPMWuerstchenScheduler
 from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, SASolverScheduler
 from diffusers.pipelines.wuerstchen.modeling_paella_vq_model import PaellaVQModel
 from diffusers import AutoencoderKL
@@ -18,13 +40,8 @@ from diffusers.utils import logging
 
 import customStylesListSC as styles
 import modelsListSC as models
+import scripts.SC_pipeline as pipeline
 
-class CascadeMemory:
-    lastSeed = -1
-    galleryIndex = 0
-    torchMessage = True     #   display information message about torch/bfloat16, set to False after first check
-    locked = False  #   for preventing changes to the following volatile state while generating
-    karras = False
 
 
 # modules/processing.py
@@ -50,10 +67,9 @@ def create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negativ
 
 
 def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, width, height, guidance_scale,
-            prior_steps, decoder_steps, seed, batch_size, PriorScheduler, style, i2iSource1, i2iSource2, i2iDenoise,):
+            prior_steps, decoder_steps, seed, num_images, PriorScheduler, style, i2iSource1, i2iSource2):
             #resolution, latentScale):
-#    from diffusers.utils import logging
-#    logging.set_verbosity(logging.ERROR)       #   download information is useful
+    logging.set_verbosity(logging.ERROR)       #   download information is useful
 
     torch.set_grad_enabled(False)
 
@@ -81,17 +97,17 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             CascadeMemory.torchMessage = False
         dtype = torch.float16
 
-#   these are image embeds, basically using images to prompt - not image to image
-    if (i2iSource1 != None or i2iSource2 != None) and i2iDenoise > 0.0:
-        imageSources=[]
-        if i2iSource1:
-            imageSources.append(i2iSource1.resize([width, height]))
-            del i2iSource1
-        if i2iSource2:
-            imageSources.append(i2iSource2.resize([width, height]))
-            del i2iSource2
-
-        prior = StableCascadePriorPipeline.from_pretrained(
+    ####   image embeds, basically using images to prompt - not image to image
+    image_embeds0 = torch.zeros(
+        num_images,
+        1,
+        768,    #why not 1280 to match text?
+        device='cpu',
+        dtype=torch.float32,
+    )
+    image_embeds0 = image_embeds0.to('cuda').to(dtype)
+    if i2iSource1 or i2iSource2:
+        prior = pipeline.StableCascadePriorPipeline_DoE.from_pretrained(
             "stabilityai/stable-cascade-prior", 
             local_files_only=False, cache_dir=".//models//diffusers//",
             prior=None,
@@ -101,162 +117,315 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             variant="bf16",
             torch_dtype=torch.float32)
 
-        image_embeds, neg_image_embeds = prior.encode_image(images=imageSources, device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=1)
-        image_embeds *= i2iDenoise     #   doesn't do much
-        image_embeds = image_embeds.to('cuda').to(dtype)
-        del prior, neg_image_embeds, imageSources
-    else:
-        image_embeds = None
 
-    if priorModel in models.models_list_prior:
-        #   custom diffusers type
-        prior = StableCascadePriorPipeline.from_pretrained(
-            priorModel, 
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            image_encoder=None, feature_extractor=None,
-            torch_dtype=dtype,)
-        prior.prior.to(memory_format=torch.channels_last)
+        if i2iSource1:
+            image_embeds1, _ = prior.encode_image(images=[i2iSource1], device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=1)
+            image_embeds1 = image_embeds1.to('cuda').to(dtype)
+            del i2iSource1
+        else:
+            image_embeds1 = image_embeds0
+
+        if i2iSource2:
+            image_embeds2, _ = prior.encode_image(images=[i2iSource2], device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=1)
+            image_embeds2 = image_embeds2.to('cuda').to(dtype)
+        else:
+            image_embeds2 = image_embeds0
+
+        del prior
+        
+        #only positive or negative matters
+        match CascadeMemory.embedsState:
+            case 3:         #   0b11: both negative
+                positive_image_embeds = torch.cat((image_embeds0, image_embeds0), dim=1)
+                negative_image_embeds = torch.cat((image_embeds1, image_embeds2), dim=1)
+            case 2:         #   0b10: 1 negative, 2 positive
+                positive_image_embeds = image_embeds2
+                negative_image_embeds = image_embeds1
+            case 1:         #   0b01, 1 positive, 2 negative
+                positive_image_embeds = image_embeds1
+                negative_image_embeds = image_embeds2
+            case 0:         #   0b00,   both positive
+                positive_image_embeds = torch.cat((image_embeds1, image_embeds2), dim=1)
+                negative_image_embeds = torch.cat((image_embeds0, image_embeds0), dim=1)
+
+        del image_embeds1, image_embeds2
     else:
-#    resolution = min(width, height) / 24   #auto calc resolution_multiple based on shortest dimension?
-        prior = StableCascadePriorPipeline.from_pretrained("stabilityai/stable-cascade-prior", 
+        positive_image_embeds = image_embeds0
+        negative_image_embeds = image_embeds0
+    del image_embeds0
+        
+    ####    image_embeds are repeated for num_images in pipeline
+    ####    end image embeds
+
+    ####   text encoder
+    source = priorModel if (priorModel in models.models_list_prior) else "stabilityai/stable-cascade-prior"
+    tokenizer = CLIPTokenizer.from_pretrained(
+        source,
+        subfolder='tokenizer',
+        local_files_only=False, cache_dir=".//models//diffusers//",
+        torch_dtype=dtype)
+
+    # get prompt text embeddings
+    positive_inputs = tokenizer(
+        positive_prompt,
+        padding="max_length",
+        max_length=tokenizer.model_max_length,
+        truncation=True,
+        return_tensors="pt",
+    )
+    positive_input_ids = positive_inputs.input_ids
+    positive_attention = positive_inputs.attention_mask
+    
+    if guidance_scale > 1.0:
+        negative_inputs = tokenizer(
+            negative_prompt,
+            padding="max_length",
+            max_length=tokenizer.model_max_length,
+            truncation=True,
+            return_tensors="pt",
+        )
+        negative_input_ids = negative_inputs.input_ids
+        negative_attention = negative_inputs.attention_mask
+        
+    del tokenizer
+
+    if CascadeMemory.teCLIP == None or source != CascadeMemory.lastTextEncoder:
+        try:
+            CascadeMemory.teCLIP = CLIPTextModelWithProjection.from_pretrained(
+                source, 
+                subfolder='text_encoder',
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                variant='bf16',
+                torch_dtype=dtype)
+        except:
+            try:
+                CascadeMemory.teCLIP = CLIPTextModelWithProjection.from_pretrained(
+                    source, 
+                    subfolder='text_encoder',
+                    local_files_only=False, cache_dir=".//models//diffusers//",
+                    torch_dtype=dtype)
+            except:
+                CascadeMemory.teCLIP = CLIPTextModelWithProjection.from_pretrained(
+                    "stabilityai/stable-cascade-prior", 
+                    subfolder='text_encoder',
+                    local_files_only=False, cache_dir=".//models//diffusers//",
+                    variant='bf16',
+                    torch_dtype=dtype)
+        CascadeMemory.lastTextEncoder = source
+
+    CascadeMemory.teCLIP.cuda()
+
+    text_encoder_output = CascadeMemory.teCLIP(
+        positive_input_ids.to('cuda'), attention_mask=positive_attention.to('cuda'), output_hidden_states=True
+    )
+    positive_embeds = text_encoder_output.hidden_states[-1]
+    positive_pooled = text_encoder_output.text_embeds.unsqueeze(1)
+
+    positive_embeds = positive_embeds.to(dtype=dtype, device='cuda')
+    positive_pooled = positive_pooled.to(dtype=dtype, device='cuda')
+    positive_embeds = positive_embeds.repeat_interleave(num_images, dim=0)
+    positive_pooled = positive_pooled.repeat_interleave(num_images, dim=0)
+
+    if guidance_scale > 1.0:
+        text_encoder_output = CascadeMemory.teCLIP(
+            negative_input_ids.to('cuda'), attention_mask=negative_attention.to('cuda'), output_hidden_states=True
+        )
+        negative_embeds = text_encoder_output.hidden_states[-1]
+        negative_pooled = text_encoder_output.text_embeds.unsqueeze(1)
+
+        negative_embeds = negative_embeds.to(dtype=dtype, device='cuda')
+        negative_pooled = negative_pooled.to(dtype=dtype, device='cuda')
+        negative_embeds = negative_embeds.repeat_interleave(num_images, dim=0)
+        negative_pooled = negative_pooled.repeat_interleave(num_images, dim=0)
+
+    if CascadeMemory.noUnload:
+        pass#CascadeMemory.teCLIP.cpu() #   try keeping on GPU to free memory to store full unet
+    else:
+        CascadeMemory.teCLIP = None
+    ####    end text_encoder
+
+    ####    setup prior pipeline
+    if CascadeMemory.prior == None:
+        CascadeMemory.prior = pipeline.StableCascadePriorPipeline_DoE.from_pretrained(
+            "stabilityai/stable-cascade-prior", 
             local_files_only=False, cache_dir=".//models//diffusers//",
-            image_encoder=None, feature_extractor=None,
+            image_encoder=None, feature_extractor=None, tokenizer=None, text_encoder=None,
             prior=None,
-            variant="bf16", torch_dtype=dtype,)
-    #        resolution_multiple = resolution)
+            variant='bf16',
+            torch_dtype=dtype,)
+    ####    end setup prior pipeline
 
-        if priorModel == "lite":
-            prior.prior = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
+    ####    get prior unet
+    if not CascadeMemory.noUnload or priorModel != CascadeMemory.lastPrior:
+        if priorModel in models.models_list_prior:
+        #   custom diffusers type
+            CascadeMemory.prior.prior = StableCascadeUNet.from_pretrained(
+                priorModel, 
+                subfolder="prior_lite" if "lite" in priorModel else "prior",
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                use_low_cpu_mem=True,
+                torch_dtype=dtype)
+        elif priorModel == "lite":
+            CascadeMemory.prior.prior = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
                 local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder="prior_lite",
-                variant="bf16", torch_dtype=dtype)
+                variant="bf16",
+                use_low_cpu_mem=True,
+                torch_dtype=dtype)
         elif priorModel == "full":
-            prior.prior = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
+            CascadeMemory.prior.prior = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
                 local_files_only=False, cache_dir=".//models//diffusers//",
                 subfolder="prior",
-                variant="bf16", torch_dtype=dtype)
+                variant="bf16",
+                use_low_cpu_mem=True,
+                torch_dtype=dtype)
         else:# ".safetensors" in priorModel:
             customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + priorModel
-            prior.prior = StableCascadeUNet.from_single_file(
+            CascadeMemory.prior.prior = StableCascadeUNet.from_single_file(
                 customStageC,
                 local_files_only=True, cache_dir=".//models//diffusers//",
                 use_safetensors=True,
                 subfolder="prior_lite" if "lite" in priorModel else "prior",
+                use_low_cpu_mem=True,
                 torch_dtype=dtype,
                 config="stabilityai/stable-cascade-prior")
 
-        prior.prior = prior.prior.to(memory_format=torch.channels_last)
+        CascadeMemory.prior.prior.to(memory_format=torch.channels_last)
+        CascadeMemory.lastPrior = priorModel if CascadeMemory.noUnload else None
+    ####    end get prior unet
 
-#    prior.enable_attention_slicing()
     if useLitePrior == False:
-        prior.enable_sequential_cpu_offload()       # good for full models on 8GB, but unnecessary for lite (and slows down generation)
+        CascadeMemory.prior.enable_sequential_cpu_offload()       # good for full models on 8GB, but unnecessary for lite (and slows down generation)
     else:
-        prior.enable_model_cpu_offload()
+        CascadeMemory.prior.to('cuda')
 
-    generator = [torch.Generator(device="cpu").manual_seed(fixed_seed+i) for i in range(batch_size)]
+    generator = [torch.Generator(device="cpu").manual_seed(fixed_seed+i) for i in range(num_images)]
 
     if PriorScheduler == 'DPM++ 2M':
-        prior.scheduler = DPMSolverMultistepScheduler.from_config(prior.scheduler.config)
+        CascadeMemory.prior.scheduler = DPMSolverMultistepScheduler.from_config(CascadeMemory.prior.scheduler.config)
     elif PriorScheduler == "DPM++ 2M SDE":
-        prior.scheduler = DPMSolverMultistepScheduler.from_config(prior.scheduler.config, algorithm_type='sde-dpmsolver++')
+        CascadeMemory.prior.scheduler = DPMSolverMultistepScheduler.from_config(CascadeMemory.prior.scheduler.config, algorithm_type='sde-dpmsolver++')
     elif PriorScheduler == "SA-solver":
-        prior.scheduler = SASolverScheduler.from_config(prior.scheduler.config, algorithm_type='data_prediction')
+        CascadeMemory.prior.scheduler = SASolverScheduler.from_config(CascadeMemory.prior.scheduler.config, algorithm_type='data_prediction')
 ####   else use default
-    if hasattr(prior.scheduler.config, 'use_karras_sigmas'):
-        prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
+    if hasattr(CascadeMemory.prior.scheduler.config, 'use_karras_sigmas'):
+        CascadeMemory.prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
 
-    prior.scheduler.config.clip_sample = False
+    CascadeMemory.prior.scheduler.config.clip_sample = False
 
     with torch.inference_mode():
-        prior_output = prior(
-            prompt=positive_prompt,
-            negative_prompt=negative_prompt,
+        prior_output = CascadeMemory.prior(
+            prompt_embeds                   = positive_embeds,
+            prompt_embeds_pooled            = positive_pooled,
+            negative_prompt_embeds          = negative_embeds,
+            negative_prompt_embeds_pooled   = negative_pooled,
 
-            image_embeds=image_embeds,
+            image_embeds=positive_image_embeds,
+            negative_image_embeds=negative_image_embeds,
 
             width=width,
             height=height,
             guidance_scale=guidance_scale,
             num_inference_steps=prior_steps,
-            num_images_per_prompt=batch_size,
+            num_images_per_prompt=num_images,
             generator=generator,
         )
 
-    prompt_embeds = prior_output.get("prompt_embeds", None)
-    prompt_embeds_pooled = prior_output.get("prompt_embeds_pooled", None)
-    negative_prompt_embeds = prior_output.get("negative_prompt_embeds", None)
-    negative_prompt_embeds_pooled = prior_output.get("negative_prompt_embeds_pooled", None)
+    del generator
+    
+    if not CascadeMemory.noUnload:
+        CascadeMemory.prior = None
 
-    del prior, generator
+    positive_embeds = prior_output.get("prompt_embeds", None)
+    positive_pooled = prior_output.get("prompt_embeds_pooled", None)
+    negative_embeds = prior_output.get("negative_prompt_embeds", None)
+    negative_pooled = prior_output.get("negative_prompt_embeds_pooled", None)
+#i: (num output images, num input images, 768)
+#e: (num output images, 77, 1280)
+#p: (num output images, 1, 1280)
 
     gc.collect()
     torch.cuda.empty_cache()
 
-    if decoderModel in models.models_list_decoder:
-        #   custom diffusers type
-        decoder = StableCascadeDecoderPipeline.from_pretrained(
-            decoderModel, 
-            local_files_only=False, cache_dir=".//models//diffusers//",
-            tokenizer=None, text_encoder=None,
-            torch_dtype=dtype,)
-            #latent_dim_scale = latentScale)
-        decoder.decoder.to(memory_format=torch.channels_last)
-    else:
-        decoder = StableCascadeDecoderPipeline.from_pretrained("stabilityai/stable-cascade", 
+    ####    setup decoder pipeline
+    if CascadeMemory.decoder == None:
+        CascadeMemory.decoder = StableCascadeDecoderPipeline.from_pretrained(
+            "stabilityai/stable-cascade", 
             local_files_only=False, cache_dir=".//models//diffusers//",
             tokenizer=None, text_encoder=None,
             decoder=None, 
             vqgan=None,
-            variant="bf16", torch_dtype=dtype,)
-            #latent_dim_scale = latentScale)
-        if decoderModel == "lite":
-            decoder.decoder = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
+            variant='bf16',
+            torch_dtype=dtype,)
+    ####    end setup decoder pipeline
+
+    ####    get decoder unet
+    if not CascadeMemory.noUnload or decoderModel != CascadeMemory.lastDecoder:
+        if decoderModel in models.models_list_decoder:
+        #   custom diffusers type
+            CascadeMemory.decoder.decoder = StableCascadeUNet.from_pretrained(
+                decoderModel, 
+                subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
                 local_files_only=False, cache_dir=".//models//diffusers//",
-                subfolder="decoder_lite", variant="bf16", torch_dtype=dtype)
+                use_low_cpu_mem=True,
+                torch_dtype=dtype)
+        elif decoderModel == "lite":
+            CascadeMemory.decoder.decoder = StableCascadeUNet.from_pretrained(
+                "stabilityai/stable-cascade", 
+                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder="decoder_lite",
+                variant="bf16",
+                use_low_cpu_mem=True,
+                torch_dtype=dtype)
         elif decoderModel == "full":
-            decoder.decoder = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade", 
+            CascadeMemory.decoder.decoder = StableCascadeUNet.from_pretrained(
+                "stabilityai/stable-cascade", 
                 local_files_only=False, cache_dir=".//models//diffusers//",
-                subfolder="decoder", variant="bf16", torch_dtype=dtype)
-        else:
-            customStageB = ".//models//diffusers//StableCascadeCustom//StageB//" + decoderModel
-            decoder.decoder = StableCascadeUNet.from_single_file(
-                customStageB,
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                subfolder="decoder",
+                variant="bf16",
+                use_low_cpu_mem=True,
+                torch_dtype=dtype)
+        else:# ".safetensors" in decoderModel:
+            customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + decoderModel
+            CascadeMemory.decoder.decoder = StableCascadeUNet.from_single_file(
+                customStageC,
+                local_files_only=True, cache_dir=".//models//diffusers//",
                 use_safetensors=True,
                 subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
+                use_low_cpu_mem=True,
+                torch_dtype=dtype,
                 config="stabilityai/stable-cascade")
 
-        decoder.decoder.to(memory_format=torch.channels_last)
-
-        if vaeModel == 'madebyollin':
-            # pause logging to block console spam
-            logging.set_verbosity(logging.ERROR)
+        CascadeMemory.decoder.decoder.to(memory_format=torch.channels_last)
+        CascadeMemory.lastDecoder = decoderModel if CascadeMemory.noUnload else None
             
-            # Load the Stage-A-ft-HQ model
-            decoder.vqgan = PaellaVQModel.from_pretrained("madebyollin/stage-a-ft-hq", 
-                                                  local_files_only=False, cache_dir=".//models//diffusers//", torch_dtype=dtype)
-            logging.set_verbosity(logging.WARN)
-        else:
-            #default
-            decoder.vqgan = PaellaVQModel.from_pretrained("stabilityai/stable-cascade", 
-                                                  local_files_only=False, cache_dir=".//models//diffusers//", subfolder="vqgan", torch_dtype=dtype)
+    ####    end get decoder unet
 
-#    decoder.enable_attention_slicing()
-    decoder.enable_model_cpu_offload()
+    ####    VAE always loaded - it's only 35MB
+    if vaeModel == 'madebyollin':
+        # Load the Stage-A-ft-HQ model
+        CascadeMemory.decoder.vqgan = PaellaVQModel.from_pretrained("madebyollin/stage-a-ft-hq", 
+                                              local_files_only=False, cache_dir=".//models//diffusers//", torch_dtype=dtype)
+    else:
+        #default
+        CascadeMemory.decoder.vqgan = PaellaVQModel.from_pretrained("stabilityai/stable-cascade", 
+                                              local_files_only=False, cache_dir=".//models//diffusers//", subfolder="vqgan", torch_dtype=dtype)
+
+    CascadeMemory.decoder.enable_model_cpu_offload()
 
     ##  regenerate the Generator, needed for deterministic outputs - reusing from earlier doesn't work
         #still not correct with custom checkpoint?
-    generator = [torch.Generator(device="cpu").manual_seed(fixed_seed+i) for i in range(batch_size)]
+    generator = [torch.Generator(device="cpu").manual_seed(fixed_seed+i) for i in range(num_images)]
 
     #   trying to colour the noise here is 100% ineffective
 
     with torch.inference_mode():
-        decoder_output = decoder(
+        decoder_output = CascadeMemory.decoder(
             image_embeddings=prior_output.image_embeddings.to(dtype),
-            prompt_embeds = prompt_embeds,
-            prompt_embeds_pooled = prompt_embeds_pooled,
-            negative_prompt_embeds = negative_prompt_embeds,
-            negative_prompt_embeds_pooled = negative_prompt_embeds_pooled,
+            prompt_embeds                   = positive_embeds,
+            prompt_embeds_pooled            = positive_pooled,
+            negative_prompt_embeds          = negative_embeds,
+            negative_prompt_embeds_pooled   = negative_pooled,
             prompt=None,
             negative_prompt=None,
             guidance_scale=1,
@@ -265,8 +434,11 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             generator=generator,
         ).images
 
-    del prior_output, prompt_embeds, prompt_embeds_pooled, negative_prompt_embeds, negative_prompt_embeds_pooled
-    del decoder, generator
+    del prior_output, positive_embeds, positive_pooled, negative_embeds, negative_pooled
+    del generator
+    
+    if not CascadeMemory.noUnload:
+        CascadeMemory.decoder = None
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -296,6 +468,9 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
 
 def on_ui_tabs():
+    if CascadeMemory.ModuleReload:
+        reload (pipeline)
+
     from modules.ui_components import ToolButton                                                     
 
     def buildModelsLists ():
@@ -328,13 +503,6 @@ def on_ui_tabs():
     def randomSeed ():
         return -1
 
-    def i2iSetDimensions (image, w, h):
-        #must be x128 to be safe, image will be resized to set width/height later
-        if image is not None:
-            w = 128 * (image.size[0] // 128)
-            h = 128 * (image.size[1] // 128)
-        return [w, h]
-
     def i2iImageFromGallery (gallery):
         try:
             newImage = gallery[CascadeMemory.galleryIndex][0]['name'].split('?')
@@ -345,6 +513,27 @@ def on_ui_tabs():
     def i2iSwap (i1, i2):
         return i2, i1
 
+    def toggleNU ():
+        if not CascadeMemory.locked:
+            CascadeMemory.noUnload ^= True
+        return gradio.Button.update(variant=['secondary', 'primary'][CascadeMemory.noUnload])
+    def unloadM ():
+        if not CascadeMemory.locked:
+            CascadeMemory.teCLIP = None
+            CascadeMemory.prior = None
+            CascadeMemory.decoder = None
+            CascadeMemory.lastPrior = None
+            CascadeMemory.lastDecoder = None
+            CascadeMemory.lastTextEncoder = None
+            gc.collect()
+            torch.cuda.empty_cache()
+        else:
+            gradio.Info('Unable to unload models while using them.')
+    def clearE ():
+        if CascadeMemory.locked:
+            CascadeMemory.locked = False
+            return gradio.Button.update(value='Generate', variant='primary', interactive=True)
+        
     def toggleSP ():
         if not CascadeMemory.locked:
             return gradio.Button.update(variant='primary')
@@ -356,7 +545,7 @@ def on_ui_tabs():
                 'roborovski/superprompt-v1',
                 cache_dir='.//models//diffusers//',
             )
-            shared.SuperPrompttokenizer = tokenizer
+            shared.SuperPrompt_tokenizer = tokenizer
         if superprompt is None:
             superprompt = T5ForConditionalGeneration.from_pretrained(
                 'roborovski/superprompt-v1',
@@ -387,6 +576,16 @@ def on_ui_tabs():
         return gradio.Button.update(variant='primary' if CascadeMemory.karras == True else 'secondary',
                                 value='\U0001D40A' if CascadeMemory.karras == True else '\U0001D542')
 
+
+    def toggleE1 ():
+        if not CascadeMemory.locked:
+            CascadeMemory.embedsState ^= 2
+        return gradio.Button.update(variant='primary' if (CascadeMemory.embedsState & 2) else 'secondary')
+    def toggleE2 ():
+        if not CascadeMemory.locked:
+            CascadeMemory.embedsState ^= 1
+        return gradio.Button.update(variant='primary' if (CascadeMemory.embedsState & 1) else 'secondary')
+            
     def toggleGenerate ():
         CascadeMemory.locked = True
         return gradio.Button.update(value='...', variant='secondary', interactive=False)
@@ -479,6 +678,8 @@ def on_ui_tabs():
                             height = float(pairs[1])
         return positive, negative, width, height, seed, scheduler, stepsP, stepsD, cfg
 
+
+
     with gradio.Blocks() as stable_cascade_block:
         with ResizeHandleRow():
             with gradio.Column():
@@ -486,9 +687,9 @@ def on_ui_tabs():
                     modelP = gradio.Dropdown(models_list_P, label='Stage C (Prior)', value="lite", type='value', scale=1)
                     refresh = ToolButton(value='\U0001f504')
                     modelD = gradio.Dropdown(models_list_D, label='Stage B (Decoder)', value="lite", type='value', scale=1)
-                    modelV = gradio.Dropdown(['default', 'madebyollin'], label='Stage A (VAE)', value='default', type='value', scale=1)
+                    modelV = gradio.Dropdown(['default', 'madebyollin'], label='Stage A (VAE)', value='default', type='value', scale=0)
                     schedulerP = gradio.Dropdown(schedulerList,
-                        label='Sampler (Prior)', value="default", type='value', scale=1)
+                        label='Sampler (Prior)', value="default", type='value', scale=0)
                     karras = ToolButton(value="\U0001D542", variant='secondary', tooltip="use Karras sigmas")
 
                 with gradio.Row():
@@ -517,19 +718,26 @@ def on_ui_tabs():
 #                    latentScale = gradio.Slider(label='Latent scale (VAE)', minimum=6, maximum=16, step=0.01, value=10.67)
 
                 with gradio.Accordion(label='Image prompt', open=False):
+#add start/end? would need to modify pipeline
+
                     with gradio.Row():
-                        with gradio.Column():
-                            i2iSource1 = gradio.Image(label='image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                            i2iSource2 = gradio.Image(sources=['upload'], type='pil', interactive=True, show_download_button=False)
-                        with gradio.Column():
-                            i2iDenoise = gradio.Slider(label='Embedding strength', minimum=0.00, maximum=2.0, step=0.01, value=1.0)
-                            i2iSetWH = gradio.Button(value='Set safe Width / Height from image (1)')
-                            i2iFromGallery1 = gradio.Button(value='Get image (1) from gallery')
-                            i2iFromGallery2 = gradio.Button(value='Get image (2) from gallery')
-                            swapImages = gradio.Button(value='Swap images')
+                        i2iSource1 = gradio.Image(label='image source', sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                        i2iSource2 = gradio.Image(sources=['upload'], type='pil', interactive=True, show_download_button=False)
+                    with gradio.Row():
+                        embed1State = ToolButton('Neg', variant='secondary')
+                        i2iFromGallery1 = gradio.Button(value='Get image (1) from gallery', scale=6)
+                        i2iFromGallery2 = gradio.Button(value='Get image (2) from gallery', scale=6)
+                        embed2State = ToolButton('Neg', variant='secondary')
+                    with gradio.Row():
+                        swapImages = gradio.Button(value='Swap images')
+
+                with gradio.Row():
+                    noUnload = gradio.Button(value='keep models loaded', variant='primary' if CascadeMemory.noUnload else 'secondary', tooltip='noUnload', scale=1)
+                    unloadModels = gradio.Button(value='unload models', tooltip='force unload of models', scale=1)
+#                    clearError = gradio.Button(value='remove Error', tooltip='clear Error', scale=1)
 
                 ctrls = [modelP, modelD, modelV, prompt, negative_prompt, width, height, guidance_scale, prior_steps, decoder_steps,
-                         sampling_seed, batch_size, schedulerP, style, i2iSource1, i2iSource2, i2iDenoise]#, resolution, latentScale]
+                         sampling_seed, batch_size, schedulerP, style, i2iSource1, i2iSource2]#, resolution, latentScale]
 
             with gradio.Column():
                 generate_button = gradio.Button(value="Generate", variant='primary')
@@ -544,6 +752,10 @@ def on_ui_tabs():
                         paste_button=button, tabname=tabname, source_text_component=prompt, source_image_component=output_gallery,
                     ))
 
+        noUnload.click(toggleNU, inputs=[], outputs=noUnload)
+        unloadModels.click(unloadM, inputs=[], outputs=[], show_progress=True)
+#        clearError.click(clearE, inputs=[], outputs=[generate_button])
+
         SP.click(toggleSP, inputs=[], outputs=SP)
         SP.click(superPrompt, inputs=[prompt, sampling_seed], outputs=[SP, prompt])
 
@@ -554,11 +766,11 @@ def on_ui_tabs():
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
 
-        i2iSetWH.click (fn=i2iSetDimensions, inputs=[i2iSource1, width, height], outputs=[width, height], show_progress=False)
         i2iFromGallery1.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource1])
         i2iFromGallery2.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource2])
         swapImages.click (fn=i2iSwap, inputs=[i2iSource1, i2iSource2], outputs=[i2iSource1, i2iSource2])
-
+        embed1State.click(fn=toggleE1, inputs=[], outputs=[embed1State], show_progress=False)
+        embed2State.click(fn=toggleE2, inputs=[], outputs=[embed2State], show_progress=False)
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
         generate_button.click(predict, inputs=ctrls, outputs=[generate_button, output_gallery])

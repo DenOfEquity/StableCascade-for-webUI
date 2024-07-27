@@ -18,6 +18,11 @@ Models will be downloaded automatically, on demand. I only use the 16 bit models
 <details>
 <summary>Change log</summary>
 
+#### 27/07/2024 ####
+* added possible mis-feature of using image embeds as negatives
+* added option to keep models in memory. Saves load time, which could be important if running from a slow hard drive. With Cascade, this seems like a good option to always have enabled and may become default behaviour in a later update.
+* also button to force unload models
+
 #### 24/07/2024 ####
 * added SuperPrompt button (ꌗ) to rewrite simple prompts with more detail. This **overwrites** the prompt. Read about SuperPrompt [here](https://brianfitzgerald.xyz/prompt-augmentation). Credit to BrianFitzgerald for the model. (all my alternate model extensions are updated to use this; the model is loaded to a shared location so there's no wasted memory due to duplicates.)
 
@@ -56,7 +61,7 @@ If you use the fixed fp16 prior, you'll need to move it into the custom stageC d
 </details>
 
 ---
-freshly updated screenshot
+freshly outdated screenshot
 
 ![](screenshot2.png "image of extension UI")
 
