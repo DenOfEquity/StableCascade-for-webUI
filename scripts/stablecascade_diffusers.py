@@ -464,7 +464,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     torch.cuda.empty_cache()
 
     CascadeMemory.locked = False
-    return gradio.Button.update(value='Generate', variant='primary', interactive=True), result
+    return gradio.Button.update(value='Generate', variant='primary', interactive=True), gradio.Button.update(interactive=True), result
 
 
 def on_ui_tabs():
@@ -588,7 +588,7 @@ def on_ui_tabs():
             
     def toggleGenerate ():
         CascadeMemory.locked = True
-        return gradio.Button.update(value='...', variant='secondary', interactive=False)
+        return gradio.Button.update(value='...', variant='secondary', interactive=False), gradio.Button.update(interactive=False)
 
     schedulerList = ["default", "DPM++ 2M", "DPM++ 2M SDE", "SA-solver", ]
 
@@ -773,8 +773,8 @@ def on_ui_tabs():
         embed2State.click(fn=toggleE2, inputs=[], outputs=[embed2State], show_progress=False)
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, output_gallery])
-        generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button])
+        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery])
+        generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button, SP])
     return [(stable_cascade_block, "StableCascade", "stable_cascade")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
