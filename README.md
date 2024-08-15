@@ -18,6 +18,13 @@ Models will be downloaded automatically, on demand. I only use the 16 bit models
 <details>
 <summary>Change log</summary>
 
+#### 13/08/2024 ####
+* added **SoteDiffusion v2** by [Disty](https://huggingface.co/Disty0) to the models list
+* **fp16** toggle button forces usage of float16, even if bfloat16 if available. Disabled means automatic selection based on Torch, preferring bfloat16 as that's what the official weights use. Sote Diffusion weights are fp16.
+* added scheduler for decoder (stage B). Didn't include this previously as it has relatively little effect.
+* tweaked UI so it works better with Gradio4
+
+
 #### 27/07/2024 ####
 * added possible mis-feature of using image embeds as negatives
 * added option to keep models in memory. Saves load time, which could be important if running from a slow hard drive. With Cascade, this seems like a good option to always have enabled and may become default behaviour in a later update.

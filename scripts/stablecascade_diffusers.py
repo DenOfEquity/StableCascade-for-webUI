@@ -1,3 +1,7 @@
+from diffusers.utils import check_min_version
+check_min_version("0.28.1")
+
+
 class CascadeMemory:
     ModuleReload = False
     noUnload = False
@@ -12,14 +16,16 @@ class CascadeMemory:
     torchMessage = True     #   display information message about torch/bfloat16, set to False after first check
     locked = False  #   for preventing changes to the following volatile state while generating
     karras = False
+    force_f16 = False
     embedsState = 0
 
+import gc
 import gradio
+import numpy
 from PIL import Image
 import torch
-import gc
 try:
-    import reload
+    from importlib import reload
     CascadeMemory.ModuleReload = True
 except:
     CascadeMemory.ModuleReload = False
@@ -32,8 +38,8 @@ import modules.infotext_utils as parameters_copypaste
 
 from transformers import T5TokenizerFast, T5ForConditionalGeneration
 from transformers import CLIPTextModelWithProjection, CLIPTokenizer
-from diffusers import StableCascadeDecoderPipeline, StableCascadeUNet#, DDPMWuerstchenScheduler
-from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, SASolverScheduler
+from diffusers import StableCascadeUNet, DDPMWuerstchenScheduler
+from diffusers import DPMSolverSinglestepScheduler, DPMSolverMultistepScheduler, LCMScheduler, SASolverScheduler
 from diffusers.pipelines.wuerstchen.modeling_paella_vq_model import PaellaVQModel
 from diffusers import AutoencoderKL
 from diffusers.utils import logging
@@ -42,20 +48,18 @@ import customStylesListSC as styles
 import modelsListSC as models
 import scripts.SC_pipeline as pipeline
 
-
-
 # modules/processing.py
-def create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, guidance_scale, prior_steps, decoder_steps, seed, scheduler, width, height, ):
+def create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, clipskip, guidance_scale, prior_steps, decoder_steps, seed, schedulerP, schedulerD, width, height, ):
     karras = " : Karras" if CascadeMemory.karras == True else ""
     generation_params = {
-        "Size": f"{width}x{height}",
-        "Seed": seed,
-        "Scheduler": f"{scheduler}{karras}",
-        "Steps(Prior/Decoder)": f"{prior_steps}/{decoder_steps}",
-        "CFG": guidance_scale,
+        "Size"                      : f"{width}x{height}",
+        "Seed"                      : seed,
+        "Scheduler(Prior/Decoder)"  : f"{schedulerP}/{schedulerD}{karras}",
+        "Steps(Prior/Decoder)"      : f"{prior_steps}/{decoder_steps}",
+        "CFG"                       : guidance_scale,
+        "CLIP skip"                 : clipskip,
     }
 
-#add i2i marker?
     model_text = "(" + priorModel.split('.')[0] + "/" + decoderModel.split('.')[0] + "/" + vaeModel + ")"
     
     prompt_text = f"Prompt: {positive_prompt}"
@@ -66,16 +70,16 @@ def create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negativ
     return f"Model: StableCascade {model_text}\n{prompt_text}\n{generation_params_text}"
 
 
-def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, width, height, guidance_scale,
-            prior_steps, decoder_steps, seed, num_images, PriorScheduler, style, i2iSource1, i2iSource2):
+def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, clipskip,  width, height, guidance_scale,
+            prior_steps, decoder_steps, seed, num_images, PriorScheduler, DecoderScheduler, style, i2iSource1, i2iSource2):
             #resolution, latentScale):
-    logging.set_verbosity(logging.ERROR)       #   download information is useful
+    logging.set_verbosity(logging.ERROR)
 
     torch.set_grad_enabled(False)
 
     if style != 0:
         positive_prompt = styles.styles_list[style][1].replace("{prompt}", positive_prompt)
-        negative_prompt = styles.styles_list[style][2] + negative_prompt
+        negative_prompt = negative_prompt + styles.styles_list[style][2]
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -86,7 +90,9 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     useLitePrior = "lite" in priorModel
     useLiteDecoder = "lite" in decoderModel
 
-    if torch.cuda.is_bf16_supported() == True and TorchVersion(torch.__version__) >= (2,2,0):
+    if CascadeMemory.force_f16 == True:
+        dtype = torch.float16
+    elif torch.cuda.is_bf16_supported() == True and int(torch.__version__[0]) >= 2 and int(torch.__version__[2]) >= 2:
         dtype = torch.bfloat16
     else:
         if CascadeMemory.torchMessage == True:
@@ -101,7 +107,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     image_embeds0 = torch.zeros(
         num_images,
         1,
-        768,    #why not 1280 to match text?
+        768,
         device='cpu',
         dtype=torch.float32,
     )
@@ -116,7 +122,6 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             scheduler=None,
             variant="bf16",
             torch_dtype=torch.float32)
-
 
         if i2iSource1:
             image_embeds1, _ = prior.encode_image(images=[i2iSource1], device='cpu', dtype=torch.float32, batch_size=1, num_images_per_prompt=1)
@@ -133,7 +138,6 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
         del prior
         
-        #only positive or negative matters
         match CascadeMemory.embedsState:
             case 3:         #   0b11: both negative
                 positive_image_embeds = torch.cat((image_embeds0, image_embeds0), dim=1)
@@ -154,7 +158,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
         negative_image_embeds = image_embeds0
     del image_embeds0
         
-    ####    image_embeds are repeated for num_images in pipeline
+    ####    note: image_embeds are repeated for num_images in pipeline
     ####    end image embeds
 
     ####   text encoder
@@ -165,28 +169,88 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
         local_files_only=False, cache_dir=".//models//diffusers//",
         torch_dtype=dtype)
 
-    # get prompt text embeddings
-    positive_inputs = tokenizer(
-        positive_prompt,
-        padding="max_length",
+    # def prompt_and_weights (tokenizer, prompt):
+        # promptSplit = prompt.split('|')
+        # newPrompt = []
+        # weights = []
+        # max_length = tokenizer.model_max_length
+        
+        # for s in promptSplit:
+            # subpromptSplit = s.strip().split(' ')
+            # cleanedPrompt = ' '.join((t.split(':')[0] for t in subpromptSplit))
+            # newPrompt.append(cleanedPrompt)
+
+            # subWeights = [1.0]
+ 
+            # for t in subpromptSplit:
+                # t = t.split(':')
+                # if len(t) == 1:
+                    # weight = 1.0
+                # elif t[1] == '':
+                    # weight = 1.0
+                # else:
+                    # try:
+                        # weight = float(t[1].rstrip(','))
+                    # except:
+                        # weight = 1.0
+     
+                # text_inputs = tokenizer(
+                    # t[0],
+                    # padding=False,
+                    # max_length=max_length,
+                    # truncation=True,
+                    # return_attention_mask=False,
+                    # add_special_tokens=False,
+                    # return_tensors="pt",
+                # )
+     
+                # tokenLength = len(text_inputs.input_ids[0])
+                # for w in range(tokenLength):
+                    # subWeights.append(weight)
+                    
+            # weights.append(subWeights)
+        # return newPrompt, weights
+
+    # fixed_positive_prompt, positive_weights = prompt_and_weights(tokenizer, positive_prompt)
+    # fixed_negative_prompt, negative_weights = prompt_and_weights(tokenizer, negative_prompt)
+
+    # while len(fixed_positive_prompt) < len(fixed_negative_prompt):
+        # fixed_positive_prompt.append('')
+        # positive_weights.append([1.0])
+    # while len(fixed_positive_prompt) > len(fixed_negative_prompt):
+        # fixed_negative_prompt.append('')
+        # negative_weights.append([1.0])
+
+    # text_inputs = tokenizer(
+        # fixed_positive_prompt + fixed_negative_prompt,
+        # padding=True,
+        # max_length=tokenizer.model_max_length,
+        # truncation=True,
+        # return_attention_mask=True,
+        # return_tensors="pt",
+    # )
+        
+    # positive_input_ids = text_inputs.input_ids[0:len(fixed_positive_prompt)]
+    # negative_input_ids = text_inputs.input_ids[len(fixed_positive_prompt):]
+
+    # positive_attention = text_inputs.attention_mask[0:len(fixed_positive_prompt)]
+    # negative_attention = text_inputs.attention_mask[len(fixed_positive_prompt):]
+
+
+    text_inputs = tokenizer(
+        [positive_prompt] + [negative_prompt],
+        padding=True,
         max_length=tokenizer.model_max_length,
         truncation=True,
+        return_attention_mask=True,
         return_tensors="pt",
     )
-    positive_input_ids = positive_inputs.input_ids
-    positive_attention = positive_inputs.attention_mask
-    
-    if guidance_scale > 1.0:
-        negative_inputs = tokenizer(
-            negative_prompt,
-            padding="max_length",
-            max_length=tokenizer.model_max_length,
-            truncation=True,
-            return_tensors="pt",
-        )
-        negative_input_ids = negative_inputs.input_ids
-        negative_attention = negative_inputs.attention_mask
-        
+    positive_input_ids = text_inputs.input_ids[0:1]
+    negative_input_ids = text_inputs.input_ids[1:]
+    positive_attention = text_inputs.attention_mask[0:1]
+    negative_attention = text_inputs.attention_mask[1:]
+
+    del text_inputs
     del tokenizer
 
     if CascadeMemory.teCLIP == None or source != CascadeMemory.lastTextEncoder:
@@ -218,8 +282,18 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     text_encoder_output = CascadeMemory.teCLIP(
         positive_input_ids.to('cuda'), attention_mask=positive_attention.to('cuda'), output_hidden_states=True
     )
-    positive_embeds = text_encoder_output.hidden_states[-1]
+    positive_embeds = text_encoder_output.hidden_states[-(clipskip+1)]
     positive_pooled = text_encoder_output.text_embeds.unsqueeze(1)
+
+    # positive_mean_before = positive_embeds.mean()
+    # for l in range(len(positive_embeds)):
+        # for p in range(min(77, len(positive_weights[l]))):
+            # positive_embeds[l][p] *= positive_weights[l][p]
+    # positive_mean_after = positive_embeds.mean()
+    # positive_embeds *= positive_mean_before / positive_mean_after
+
+    positive_embeds = positive_embeds.view(1, -1, 1280)
+    positive_pooled = positive_pooled[0].unsqueeze(0)
 
     positive_embeds = positive_embeds.to(dtype=dtype, device='cuda')
     positive_pooled = positive_pooled.to(dtype=dtype, device='cuda')
@@ -233,10 +307,24 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
         negative_embeds = text_encoder_output.hidden_states[-1]
         negative_pooled = text_encoder_output.text_embeds.unsqueeze(1)
 
+        # negative_mean_before = negative_embeds.mean()
+        # for l in range(len(negative_embeds)):
+            # for p in range(min(77, len(negative_weights[l]))):
+                # negative_embeds[l][p] *= negative_weights[l][p]
+        # negative_mean_after = negative_embeds.mean()
+        # negative_embeds *= negative_mean_before / negative_mean_after
+
+        negative_embeds = negative_embeds.view(1, -1, 1280)
+        negative_pooled = negative_pooled[0].unsqueeze(0)
         negative_embeds = negative_embeds.to(dtype=dtype, device='cuda')
         negative_pooled = negative_pooled.to(dtype=dtype, device='cuda')
         negative_embeds = negative_embeds.repeat_interleave(num_images, dim=0)
         negative_pooled = negative_pooled.repeat_interleave(num_images, dim=0)
+    else:
+        negative_embeds = None
+        negative_pooled = None
+
+    del positive_input_ids, negative_input_ids, positive_attention, negative_attention
 
     if CascadeMemory.noUnload:
         pass#CascadeMemory.teCLIP.cpu() #   try keeping on GPU to free memory to store full unet
@@ -257,6 +345,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
     ####    get prior unet
     if not CascadeMemory.noUnload or priorModel != CascadeMemory.lastPrior:
+        print ("StableCascade: loading prior unet ...", end="\r", flush=True)
         if priorModel in models.models_list_prior:
         #   custom diffusers type
             CascadeMemory.prior.prior = StableCascadeUNet.from_pretrained(
@@ -301,17 +390,23 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
     generator = [torch.Generator(device="cpu").manual_seed(fixed_seed+i) for i in range(num_images)]
 
-    if PriorScheduler == 'DPM++ 2M':
-        CascadeMemory.prior.scheduler = DPMSolverMultistepScheduler.from_config(CascadeMemory.prior.scheduler.config)
-    elif PriorScheduler == "DPM++ 2M SDE":
-        CascadeMemory.prior.scheduler = DPMSolverMultistepScheduler.from_config(CascadeMemory.prior.scheduler.config, algorithm_type='sde-dpmsolver++')
-    elif PriorScheduler == "SA-solver":
-        CascadeMemory.prior.scheduler = SASolverScheduler.from_config(CascadeMemory.prior.scheduler.config, algorithm_type='data_prediction')
-####   else use default
-    if hasattr(CascadeMemory.prior.scheduler.config, 'use_karras_sigmas'):
-        CascadeMemory.prior.scheduler.config.use_karras_sigmas = CascadeMemory.karras
+    schedulerConfig = dict(CascadeMemory.prior.scheduler.config)
+    schedulerConfig['use_karras_sigmas'] = CascadeMemory.karras
+    schedulerConfig['clip_sample'] = False
+    schedulerConfig.pop('algorithm_type', None) 
 
-    CascadeMemory.prior.scheduler.config.clip_sample = False
+    if PriorScheduler == 'DPM++ 2M':
+        CascadeMemory.prior.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
+    elif PriorScheduler == "DPM++ 2M SDE":
+        schedulerConfig['algorithm_type'] = 'sde-dpmsolver++'
+        CascadeMemory.prior.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
+    elif PriorScheduler == "LCM":
+        CascadeMemory.prior.scheduler = LCMScheduler.from_config(schedulerConfig)
+    elif PriorScheduler == "SA-solver":
+        schedulerConfig['algorithm_type'] = 'data_prediction'
+        CascadeMemory.prior.scheduler = SASolverScheduler.from_config(schedulerConfig)
+    else:
+        CascadeMemory.prior.scheduler = DDPMWuerstchenScheduler.from_config(schedulerConfig)
 
     with torch.inference_mode():
         prior_output = CascadeMemory.prior(
@@ -334,7 +429,8 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     del generator
     
     if not CascadeMemory.noUnload:
-        CascadeMemory.prior = None
+        CascadeMemory.prior.prior= None
+        CascadeMemory.lastPrior = None
 
     positive_embeds = prior_output.get("prompt_embeds", None)
     positive_pooled = prior_output.get("prompt_embeds_pooled", None)
@@ -349,10 +445,9 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
     ####    setup decoder pipeline
     if CascadeMemory.decoder == None:
-        CascadeMemory.decoder = StableCascadeDecoderPipeline.from_pretrained(
+        CascadeMemory.decoder = pipeline.StableCascadeDecoderPipeline_DoE.from_pretrained(
             "stabilityai/stable-cascade", 
             local_files_only=False, cache_dir=".//models//diffusers//",
-            tokenizer=None, text_encoder=None,
             decoder=None, 
             vqgan=None,
             variant='bf16',
@@ -361,6 +456,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
     ####    get decoder unet
     if not CascadeMemory.noUnload or decoderModel != CascadeMemory.lastDecoder:
+        print ("StableCascade: loading decoder unet ...", end="\r", flush=True)
         if decoderModel in models.models_list_decoder:
         #   custom diffusers type
             CascadeMemory.decoder.decoder = StableCascadeUNet.from_pretrained(
@@ -398,7 +494,6 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
         CascadeMemory.decoder.decoder.to(memory_format=torch.channels_last)
         CascadeMemory.lastDecoder = decoderModel if CascadeMemory.noUnload else None
-            
     ####    end get decoder unet
 
     ####    VAE always loaded - it's only 35MB
@@ -419,6 +514,24 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 
     #   trying to colour the noise here is 100% ineffective
 
+    schedulerConfig = dict(CascadeMemory.decoder.scheduler.config)
+    schedulerConfig['use_karras_sigmas'] = CascadeMemory.karras
+    schedulerConfig['clip_sample'] = False
+    schedulerConfig.pop('algorithm_type', None) 
+
+    if DecoderScheduler == 'DPM++ 2M':
+        CascadeMemory.decoder.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
+    elif DecoderScheduler == "DPM++ 2M SDE":
+        schedulerConfig['algorithm_type'] = 'sde-dpmsolver++'
+        CascadeMemory.decoder.scheduler = DPMSolverMultistepScheduler.from_config(schedulerConfig)
+    elif DecoderScheduler == "LCM":
+        CascadeMemory.decoder.scheduler = LCMScheduler.from_config(schedulerConfig)
+    elif DecoderScheduler == "SA-solver":
+        schedulerConfig['algorithm_type'] = 'data_prediction'
+        CascadeMemory.decoder.scheduler = SASolverScheduler.from_config(schedulerConfig)
+    else:
+        CascadeMemory.decoder.scheduler = DDPMWuerstchenScheduler.from_config(schedulerConfig)
+
     with torch.inference_mode():
         decoder_output = CascadeMemory.decoder(
             image_embeddings=prior_output.image_embeddings.to(dtype),
@@ -438,7 +551,9 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     del generator
     
     if not CascadeMemory.noUnload:
-        CascadeMemory.decoder = None
+        CascadeMemory.decoder.decoder = None
+        CascadeMemory.decoder.vqgan = None
+        CascadeMemory.lastDecoder = None
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -446,8 +561,8 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     result = []
 
     for image in decoder_output:
-        info=create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, guidance_scale, prior_steps, decoder_steps, fixed_seed,
-                             PriorScheduler, width, height)
+        info=create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, clipskip, guidance_scale, prior_steps, decoder_steps, fixed_seed,
+                             PriorScheduler, DecoderScheduler, width, height)
         result.append((image, info))
         images.save_image(
             image,
@@ -470,6 +585,8 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
 def on_ui_tabs():
     if CascadeMemory.ModuleReload:
         reload (pipeline)
+        reload (models)
+        reload (styles)
 
     from modules.ui_components import ToolButton                                                     
 
@@ -575,6 +692,10 @@ def on_ui_tabs():
             CascadeMemory.karras ^= True
         return gradio.Button.update(variant='primary' if CascadeMemory.karras == True else 'secondary',
                                 value='\U0001D40A' if CascadeMemory.karras == True else '\U0001D542')
+    def toggleF16 ():
+        if not CascadeMemory.locked:
+            CascadeMemory.force_f16 ^= True
+        return gradio.Button.update(variant='primary' if CascadeMemory.force_f16 == True else 'secondary')
 
 
     def toggleE1 ():
@@ -590,9 +711,9 @@ def on_ui_tabs():
         CascadeMemory.locked = True
         return gradio.Button.update(value='...', variant='secondary', interactive=False), gradio.Button.update(interactive=False)
 
-    schedulerList = ["default", "DPM++ 2M", "DPM++ 2M SDE", "SA-solver", ]
+    schedulerList = ["default", "DPM++ 2M", "DPM++ 2M SDE", "LCM", "SA-solver", ]
 
-    def parsePrompt (positive, negative, width, height, seed, scheduler, stepsP, stepsD, cfg):
+    def parsePrompt (positive, negative, clipskip, width, height, seed, schedulerP, schedulerD, stepsP, stepsD, cfg):
         p = positive.split('\n')
         lineCount = len(p)
 
@@ -649,18 +770,25 @@ def on_ui_tabs():
                     match pairs[0]:
                         case "Size:":
                             size = pairs[1].split('x')
-                            width = int(size[0])
-                            height = int(size[1])
+                            width = 128 * ((int(size[0]) + 64) // 128)
+                            height = 128 * ((int(size[1]) + 64) // 128)
                         case "Seed:":
                             seed = int(pairs[1])
                         case "Sampler:":
                             sched = ' '.join(pairs[1:])
                             if sched in schedulerList:
                                 scheduler = sched
+                        case "Scheduler(Prior/Decoder):":
+                            sched = ' '.join(pairs[1:])
+                            sched = sched.split('/')
+                            if sched[0] in schedulerList:
+                                schedulerP = sched[0]
+                            if sched[1] in schedulerList:
+                                schedulerD = sched[1]
                         case "Scheduler:":
                             sched = ' '.join(pairs[1:])
                             if sched in schedulerList:
-                                scheduler = sched
+                                schedulerP = sched
                         case "Steps(Prior/Decoder):":
                             steps = str(pairs[1]).split('/')
                             stepsP = int(steps[0])
@@ -673,10 +801,12 @@ def on_ui_tabs():
                         case "CFG:":
                             cfg = float(pairs[1])
                         case "width:":
-                            width = float(pairs[1])
+                            width = 128 * ((int(pairs[1]) + 64) // 128)
                         case "height:":
-                            height = float(pairs[1])
-        return positive, negative, width, height, seed, scheduler, stepsP, stepsD, cfg
+                            height = 128 * ((int(pairs[1]) + 64) // 128)
+                        case "CLIP skip:":
+                            clipskip = int(pairs[1])
+        return positive, negative, clipskip, width, height, seed, schedulerP, schedulerD, stepsP, stepsD, cfg
 
 
 
@@ -684,22 +814,26 @@ def on_ui_tabs():
         with ResizeHandleRow():
             with gradio.Column():
                 with gradio.Row():
-                    modelP = gradio.Dropdown(models_list_P, label='Stage C (Prior)', value="lite", type='value', scale=1)
                     refresh = ToolButton(value='\U0001f504')
-                    modelD = gradio.Dropdown(models_list_D, label='Stage B (Decoder)', value="lite", type='value', scale=1)
+                    modelP = gradio.Dropdown(models_list_P, label='Stage C (Prior)', value="lite", type='value', scale=2)
+                    modelD = gradio.Dropdown(models_list_D, label='Stage B (Decoder)', value="lite", type='value', scale=2)
                     modelV = gradio.Dropdown(['default', 'madebyollin'], label='Stage A (VAE)', value='default', type='value', scale=0)
-                    schedulerP = gradio.Dropdown(schedulerList,
-                        label='Sampler (Prior)', value="default", type='value', scale=0)
+                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=2, step=1, value=0, precision=0, scale=1)
+
+                with gradio.Row():
+                    parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
+                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
                     karras = ToolButton(value="\U0001D542", variant='secondary', tooltip="use Karras sigmas")
+                    schedulerP = gradio.Dropdown(schedulerList, label='Sampler (Prior)', value="default", type='value', scale=1)
+                    schedulerD = gradio.Dropdown(schedulerList, label='Sampler (Decoder)', value="default", type='value', scale=1)
+                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=1)
+                    f16 = ToolButton(value="f16", variant='secondary', tooltip="force float16")
 
                 with gradio.Row():
                     prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
-                    parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
-                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
 
                 with gradio.Row():
                     negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=1.0)
-                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
                 with gradio.Row():
                     width = gradio.Slider(label='Width', minimum=128, maximum=4096, step=128, value=1024, elem_id="StableCascade_width")
                     swapper = ToolButton(value="\U000021C4")
@@ -736,8 +870,8 @@ def on_ui_tabs():
                     unloadModels = gradio.Button(value='unload models', tooltip='force unload of models', scale=1)
 #                    clearError = gradio.Button(value='remove Error', tooltip='clear Error', scale=1)
 
-                ctrls = [modelP, modelD, modelV, prompt, negative_prompt, width, height, guidance_scale, prior_steps, decoder_steps,
-                         sampling_seed, batch_size, schedulerP, style, i2iSource1, i2iSource2]#, resolution, latentScale]
+                ctrls = [modelP, modelD, modelV, prompt, negative_prompt, clipskip, width, height, guidance_scale, prior_steps, decoder_steps,
+                         sampling_seed, batch_size, schedulerP, schedulerD, style, i2iSource1, i2iSource2]#, resolution, latentScale]
 
             with gradio.Column():
                 generate_button = gradio.Button(value="Generate", variant='primary')
@@ -759,9 +893,10 @@ def on_ui_tabs():
         SP.click(toggleSP, inputs=[], outputs=SP)
         SP.click(superPrompt, inputs=[prompt, sampling_seed], outputs=[SP, prompt])
 
-        parse.click(parsePrompt, inputs=[prompt, negative_prompt, width, height, sampling_seed, schedulerP, prior_steps, decoder_steps, guidance_scale], outputs=[prompt, negative_prompt, width, height, sampling_seed, schedulerP, prior_steps, decoder_steps, guidance_scale], show_progress=False)
+        parse.click(parsePrompt, inputs=[prompt, negative_prompt, clipskip, width, height, sampling_seed, schedulerP, schedulerD, prior_steps, decoder_steps, guidance_scale], outputs=[prompt, negative_prompt, clipskip, width, height, sampling_seed, schedulerP, schedulerD, prior_steps, decoder_steps, guidance_scale], show_progress=False)
         refresh.click(refreshModels, inputs=[], outputs=[modelP, modelD])
         karras.click(toggleKarras, inputs=[], outputs=karras)
+        f16.click(toggleF16, inputs=[], outputs=f16)
         swapper.click(fn=None, _js="function(){switchWidthHeight('StableCascade')}", inputs=None, outputs=None, show_progress=False)
         random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
@@ -775,6 +910,6 @@ def on_ui_tabs():
 
         generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery])
         generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button, SP])
-    return [(stable_cascade_block, "StableCascade", "stable_cascade")]
+    return [(stable_cascade_block, "StableCascade", "stable_cascade_DoE")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
