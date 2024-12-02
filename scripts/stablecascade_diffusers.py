@@ -115,7 +115,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     if i2iSource1 or i2iSource2:
         prior = pipeline.StableCascadePriorPipeline_DoE.from_pretrained(
             "stabilityai/stable-cascade-prior", 
-            local_files_only=False, cache_dir=".//models//diffusers//",
+            local_files_only=False,
             prior=None,
             text_encoder=None,
             tokenizer=None,
@@ -166,7 +166,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     tokenizer = CLIPTokenizer.from_pretrained(
         source,
         subfolder='tokenizer',
-        local_files_only=False, cache_dir=".//models//diffusers//",
+        local_files_only=False,
         torch_dtype=dtype)
 
     # def prompt_and_weights (tokenizer, prompt):
@@ -258,7 +258,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             CascadeMemory.teCLIP = CLIPTextModelWithProjection.from_pretrained(
                 source, 
                 subfolder='text_encoder',
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 variant='bf16',
                 torch_dtype=dtype)
         except:
@@ -266,13 +266,13 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
                 CascadeMemory.teCLIP = CLIPTextModelWithProjection.from_pretrained(
                     source, 
                     subfolder='text_encoder',
-                    local_files_only=False, cache_dir=".//models//diffusers//",
+                    local_files_only=False,
                     torch_dtype=dtype)
             except:
                 CascadeMemory.teCLIP = CLIPTextModelWithProjection.from_pretrained(
                     "stabilityai/stable-cascade-prior", 
                     subfolder='text_encoder',
-                    local_files_only=False, cache_dir=".//models//diffusers//",
+                    local_files_only=False,
                     variant='bf16',
                     torch_dtype=dtype)
         CascadeMemory.lastTextEncoder = source
@@ -336,7 +336,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     if CascadeMemory.prior == None:
         CascadeMemory.prior = pipeline.StableCascadePriorPipeline_DoE.from_pretrained(
             "stabilityai/stable-cascade-prior", 
-            local_files_only=False, cache_dir=".//models//diffusers//",
+            local_files_only=False,
             image_encoder=None, feature_extractor=None, tokenizer=None, text_encoder=None,
             prior=None,
             variant='bf16',
@@ -351,19 +351,19 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             CascadeMemory.prior.prior = StableCascadeUNet.from_pretrained(
                 priorModel, 
                 subfolder="prior_lite" if "lite" in priorModel else "prior",
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 use_low_cpu_mem=True,
                 torch_dtype=dtype)
         elif priorModel == "lite":
             CascadeMemory.prior.prior = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 subfolder="prior_lite",
                 variant="bf16",
                 use_low_cpu_mem=True,
                 torch_dtype=dtype)
         elif priorModel == "full":
             CascadeMemory.prior.prior = StableCascadeUNet.from_pretrained("stabilityai/stable-cascade-prior", 
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 subfolder="prior",
                 variant="bf16",
                 use_low_cpu_mem=True,
@@ -372,7 +372,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + priorModel
             CascadeMemory.prior.prior = StableCascadeUNet.from_single_file(
                 customStageC,
-                local_files_only=True, cache_dir=".//models//diffusers//",
+                local_files_only=True,
                 use_safetensors=True,
                 subfolder="prior_lite" if "lite" in priorModel else "prior",
                 use_low_cpu_mem=True,
@@ -447,7 +447,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     if CascadeMemory.decoder == None:
         CascadeMemory.decoder = pipeline.StableCascadeDecoderPipeline_DoE.from_pretrained(
             "stabilityai/stable-cascade", 
-            local_files_only=False, cache_dir=".//models//diffusers//",
+            local_files_only=False,
             decoder=None, 
             vqgan=None,
             variant='bf16',
@@ -462,13 +462,13 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             CascadeMemory.decoder.decoder = StableCascadeUNet.from_pretrained(
                 decoderModel, 
                 subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 use_low_cpu_mem=True,
                 torch_dtype=dtype)
         elif decoderModel == "lite":
             CascadeMemory.decoder.decoder = StableCascadeUNet.from_pretrained(
                 "stabilityai/stable-cascade", 
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 subfolder="decoder_lite",
                 variant="bf16",
                 use_low_cpu_mem=True,
@@ -476,7 +476,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
         elif decoderModel == "full":
             CascadeMemory.decoder.decoder = StableCascadeUNet.from_pretrained(
                 "stabilityai/stable-cascade", 
-                local_files_only=False, cache_dir=".//models//diffusers//",
+                local_files_only=False,
                 subfolder="decoder",
                 variant="bf16",
                 use_low_cpu_mem=True,
@@ -485,7 +485,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             customStageC = ".//models//diffusers//StableCascadeCustom//StageC//" + decoderModel
             CascadeMemory.decoder.decoder = StableCascadeUNet.from_single_file(
                 customStageC,
-                local_files_only=True, cache_dir=".//models//diffusers//",
+                local_files_only=True,
                 use_safetensors=True,
                 subfolder="decoder_lite" if "lite" in decoderModel else "decoder",
                 use_low_cpu_mem=True,
@@ -500,11 +500,11 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     if vaeModel == 'madebyollin':
         # Load the Stage-A-ft-HQ model
         CascadeMemory.decoder.vqgan = PaellaVQModel.from_pretrained("madebyollin/stage-a-ft-hq", 
-                                              local_files_only=False, cache_dir=".//models//diffusers//", torch_dtype=dtype)
+                                              local_files_only=False, torch_dtype=dtype)
     else:
         #default
         CascadeMemory.decoder.vqgan = PaellaVQModel.from_pretrained("stabilityai/stable-cascade", 
-                                              local_files_only=False, cache_dir=".//models//diffusers//", subfolder="vqgan", torch_dtype=dtype)
+                                              local_files_only=False, subfolder="vqgan", torch_dtype=dtype)
 
     CascadeMemory.decoder.enable_model_cpu_offload()
 
@@ -617,9 +617,6 @@ def on_ui_tabs():
     def reuseLastSeed ():
         return CascadeMemory.lastSeed + CascadeMemory.galleryIndex
         
-    def randomSeed ():
-        return -1
-
     def i2iImageFromGallery (gallery):
         try:
             newImage = gallery[CascadeMemory.galleryIndex][0]['name'].split('?')
@@ -660,13 +657,11 @@ def on_ui_tabs():
         if tokenizer is None:
             tokenizer = T5TokenizerFast.from_pretrained(
                 'roborovski/superprompt-v1',
-                cache_dir='.//models//diffusers//',
             )
             shared.SuperPrompt_tokenizer = tokenizer
         if superprompt is None:
             superprompt = T5ForConditionalGeneration.from_pretrained(
                 'roborovski/superprompt-v1',
-                cache_dir='.//models//diffusers//',
                 device_map='auto',
                 torch_dtype=torch.float16
             )
@@ -830,7 +825,7 @@ def on_ui_tabs():
                     f16 = ToolButton(value="f16", variant='secondary', tooltip="force float16")
 
                 with gradio.Row():
-                    prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', default='', lines=2)
+                    prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', lines=2)
 
                 with gradio.Row():
                     negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=1.0)
@@ -875,7 +870,7 @@ def on_ui_tabs():
 
             with gradio.Column():
                 generate_button = gradio.Button(value="Generate", variant='primary')
-                output_gallery = gradio.Gallery(label='Output', height="75vh", show_label=False,
+                output_gallery = gradio.Gallery(label='Output', height="75vh", show_label=False, interactive=False,
                                             object_fit='contain', visible=True, columns=1, preview=True)
                 
                 with gradio.Row():
@@ -897,8 +892,8 @@ def on_ui_tabs():
         refresh.click(refreshModels, inputs=[], outputs=[modelP, modelD])
         karras.click(toggleKarras, inputs=[], outputs=karras)
         f16.click(toggleF16, inputs=[], outputs=f16)
-        swapper.click(fn=None, _js="function(){switchWidthHeight('StableCascade')}", inputs=None, outputs=None, show_progress=False)
-        random.click(randomSeed, inputs=[], outputs=sampling_seed, show_progress=False)
+        swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
+        random.click(lambda : -1, inputs=[], outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
 
         i2iFromGallery1.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource1])
@@ -908,7 +903,7 @@ def on_ui_tabs():
         embed2State.click(fn=toggleE2, inputs=[], outputs=[embed2State], show_progress=False)
         output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery])
+        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button)
         generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button, SP])
     return [(stable_cascade_block, "StableCascade", "stable_cascade_DoE")]
 
