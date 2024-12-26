@@ -12,7 +12,6 @@ class CascadeMemory:
     prior = None
     decoder = None
     lastSeed = -1
-    galleryIndex = 0
     torchMessage = True     #   display information message about torch/bfloat16, set to False after first check
     locked = False  #   for preventing changes to the following volatile state while generating
     karras = False
@@ -62,12 +61,12 @@ def create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negativ
 
     model_text = "(" + priorModel.split('.')[0] + "/" + decoderModel.split('.')[0] + "/" + vaeModel + ")"
     
-    prompt_text = f"Prompt: {positive_prompt}"
+    prompt_text = f"{positive_prompt}"
     if negative_prompt != "":
-        prompt_text += (f"\nNegative: {negative_prompt}")
+        prompt_text += (f"\nNegative prompt: {negative_prompt}")
     generation_params_text = ", ".join([k if k == v else f'{k}: {v}' for k, v in generation_params.items() if v is not None])
 
-    return f"Model: StableCascade {model_text}\n{prompt_text}\n{generation_params_text}"
+    return f"{prompt_text}{generation_params_text}, Model (StableCascade): {model_text}"
 
 
 def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, clipskip,  width, height, guidance_scale,
@@ -611,15 +610,18 @@ def on_ui_tabs():
         prior, decoder = buildModelsLists ()
         return gradio.Dropdown.update(choices=prior), gradio.Dropdown.update(choices=decoder)
 
-    def getGalleryIndex (evt: gradio.SelectData):
-        CascadeMemory.galleryIndex = evt.index
+    def getGalleryIndex (index):
+        return index
 
-    def reuseLastSeed ():
-        return CascadeMemory.lastSeed + CascadeMemory.galleryIndex
+    def getGalleryText (gallery, index):
+        return gallery[index][1]
+
+    def reuseLastSeed (index):
+        return CascadeMemory.lastSeed + index
         
-    def i2iImageFromGallery (gallery):
+    def i2iImageFromGallery (gallery, index):
         try:
-            newImage = gallery[CascadeMemory.galleryIndex][0]['name'].split('?')
+            newImage = gallery[index][0]['name'].split('?')
             return newImage[0]
         except:
             return None
@@ -813,26 +815,27 @@ def on_ui_tabs():
                     modelP = gradio.Dropdown(models_list_P, label='Stage C (Prior)', value="lite", type='value', scale=2)
                     modelD = gradio.Dropdown(models_list_D, label='Stage B (Decoder)', value="lite", type='value', scale=2)
                     modelV = gradio.Dropdown(['default', 'madebyollin'], label='Stage A (VAE)', value='default', type='value', scale=0)
-                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=2, step=1, value=0, precision=0, scale=1)
 
                 with gradio.Row():
                     parse = ToolButton(value="↙️", variant='secondary', tooltip="parse")
-                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='zero out negative embeds')
+                    SP = ToolButton(value='ꌗ', variant='secondary', tooltip='prompt enhancement')
                     karras = ToolButton(value="\U0001D542", variant='secondary', tooltip="use Karras sigmas")
                     schedulerP = gradio.Dropdown(schedulerList, label='Sampler (Prior)', value="default", type='value', scale=1)
                     schedulerD = gradio.Dropdown(schedulerList, label='Sampler (Decoder)', value="default", type='value', scale=1)
-                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=1)
                     f16 = ToolButton(value="f16", variant='secondary', tooltip="force float16")
 
                 with gradio.Row():
                     prompt = gradio.Textbox(label='Prompt', placeholder='Enter a prompt here...', lines=2)
+                    clipskip = gradio.Number(label='CLIP skip', minimum=0, maximum=2, step=1, value=0, precision=0, scale=0)
 
                 with gradio.Row():
                     negative_prompt = gradio.Textbox(label='Negative', placeholder='', lines=1.0)
+                    style = gradio.Dropdown([x[0] for x in styles.styles_list], label='Style', value="(None)", type='index', scale=0)
+
                 with gradio.Row():
-                    width = gradio.Slider(label='Width', minimum=128, maximum=4096, step=128, value=1024, elem_id="StableCascade_width")
+                    width = gradio.Slider(label='Width', minimum=128, maximum=4096, step=128, value=1024)
                     swapper = ToolButton(value="\U000021C4")
-                    height = gradio.Slider(label='Height', minimum=128, maximum=4096, step=128, value=1024, elem_id="StableCascade_height")
+                    height = gradio.Slider(label='Height', minimum=128, maximum=4096, step=128, value=1024)
                 with gradio.Row():
                     prior_steps = gradio.Slider(label='Steps (Prior)', minimum=1, maximum=60, step=1, value=20)
                     decoder_steps = gradio.Slider(label='Steps (Decoder)', minimum=1, maximum=40, step=1, value=10)
@@ -870,15 +873,18 @@ def on_ui_tabs():
 
             with gradio.Column():
                 generate_button = gradio.Button(value="Generate", variant='primary')
-                output_gallery = gradio.Gallery(label='Output', height="75vh", show_label=False, interactive=False,
+                output_gallery = gradio.Gallery(label='Output', height="75vh", show_label=False, interactive=False, elem_id="Cascade_gallery", 
                                             object_fit='contain', visible=True, columns=1, preview=True)
                 
+                gallery_index = gradio.Number(value=0, visible=False)
+                infotext = gradio.Textbox(value="", visible=False)
+
                 with gradio.Row():
                     buttons = parameters_copypaste.create_buttons(["img2img", "inpaint", "extras"])
 
                 for tabname, button in buttons.items():
                     parameters_copypaste.register_paste_params_button(parameters_copypaste.ParamBinding(
-                        paste_button=button, tabname=tabname, source_text_component=prompt, source_image_component=output_gallery,
+                        paste_button=button, tabname=tabname, source_text_component=infotext, source_image_component=output_gallery,
                     ))
 
         noUnload.click(toggleNU, inputs=[], outputs=noUnload)
@@ -894,17 +900,17 @@ def on_ui_tabs():
         f16.click(toggleF16, inputs=[], outputs=f16)
         swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
         random.click(lambda : -1, inputs=[], outputs=sampling_seed, show_progress=False)
-        reuseSeed.click(reuseLastSeed, inputs=[], outputs=sampling_seed, show_progress=False)
+        reuseSeed.click(reuseLastSeed, inputs=gallery_index, outputs=sampling_seed, show_progress=False)
 
-        i2iFromGallery1.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource1])
-        i2iFromGallery2.click (fn=i2iImageFromGallery, inputs=[output_gallery], outputs=[i2iSource2])
+        i2iFromGallery1.click (fn=i2iImageFromGallery, inputs=[output_gallery, gallery_index], outputs=[i2iSource1])
+        i2iFromGallery2.click (fn=i2iImageFromGallery, inputs=[output_gallery, gallery_index], outputs=[i2iSource2])
         swapImages.click (fn=i2iSwap, inputs=[i2iSource1, i2iSource2], outputs=[i2iSource1, i2iSource2])
         embed1State.click(fn=toggleE1, inputs=[], outputs=[embed1State], show_progress=False)
         embed2State.click(fn=toggleE2, inputs=[], outputs=[embed2State], show_progress=False)
-        output_gallery.select (fn=getGalleryIndex, inputs=[], outputs=[])
 
-        generate_button.click(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button)
-        generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button, SP])
+        output_gallery.select(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
+
+        generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button, SP]).then(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button).then(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
     return [(stable_cascade_block, "StableCascade", "stable_cascade_DoE")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
