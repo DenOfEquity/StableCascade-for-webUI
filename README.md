@@ -8,6 +8,8 @@ Go to the **Extensions** tab, then **Install from URL**, use the URL for this re
 
 In the webUI directory there is a file called `requirements_versions.txt`, look for the line `diffusers==0.25.0` (probably the last line) and edit it to `diffusers>=0.28.1`. If the line doesn't exist, just add it. Fully restart the webUI; the newer version will be installed on update. 
 
+Forge2 is already using 0.29.2, so no change is necessary.
+
 At your own risk. This is ~~moderately~~ reasonably tested, but only on my computer.
 Models will be downloaded automatically, on demand. I only use the 16 bit models.
 
@@ -17,6 +19,9 @@ Models will be downloaded automatically, on demand. I only use the 16 bit models
 ---
 <details>
 <summary>Change log</summary>
+
+#### 26/12/2024 ####
+* fixes for gallery, sending to i2i
 
 #### 13/08/2024 ####
 * added **SoteDiffusion v2** by [Disty](https://huggingface.co/Disty0) to the models list
