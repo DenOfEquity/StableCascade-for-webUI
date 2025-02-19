@@ -557,11 +557,11 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
     gc.collect()
     torch.cuda.empty_cache()
 
+    original_samples_filename_pattern = opts.samples_filename_pattern
+    opts.samples_filename_pattern = "Cascade_[datetime]"
     result = []
-
     for image in decoder_output:
-        info=create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, clipskip, guidance_scale, prior_steps, decoder_steps, fixed_seed,
-                             PriorScheduler, DecoderScheduler, width, height)
+        info=create_infotext(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt, clipskip, guidance_scale, prior_steps, decoder_steps, fixed_seed, PriorScheduler, DecoderScheduler, width, height)
         result.append((image, info))
         images.save_image(
             image,
@@ -573,6 +573,7 @@ def predict(priorModel, decoderModel, vaeModel, positive_prompt, negative_prompt
             info
         )
         fixed_seed += 1
+    opts.samples_filename_pattern = original_samples_filename_pattern
 
     gc.collect()
     torch.cuda.empty_cache()
@@ -887,30 +888,30 @@ def on_ui_tabs():
                         paste_button=button, tabname=tabname, source_text_component=infotext, source_image_component=output_gallery,
                     ))
 
-        noUnload.click(toggleNU, inputs=[], outputs=noUnload)
-        unloadModels.click(unloadM, inputs=[], outputs=[], show_progress=True)
-#        clearError.click(clearE, inputs=[], outputs=[generate_button])
+        noUnload.click(toggleNU, inputs=None, outputs=noUnload)
+        unloadModels.click(unloadM, inputs=None, outputs=None, show_progress=True)
+#        clearError.click(clearE, inputs=None, outputs=[generate_button])
 
-        SP.click(toggleSP, inputs=[], outputs=SP)
+        SP.click(toggleSP, inputs=None, outputs=SP)
         SP.click(superPrompt, inputs=[prompt, sampling_seed], outputs=[SP, prompt])
 
         parse.click(parsePrompt, inputs=[prompt, negative_prompt, clipskip, width, height, sampling_seed, schedulerP, schedulerD, prior_steps, decoder_steps, guidance_scale], outputs=[prompt, negative_prompt, clipskip, width, height, sampling_seed, schedulerP, schedulerD, prior_steps, decoder_steps, guidance_scale], show_progress=False)
-        refresh.click(refreshModels, inputs=[], outputs=[modelP, modelD])
-        karras.click(toggleKarras, inputs=[], outputs=karras)
-        f16.click(toggleF16, inputs=[], outputs=f16)
+        refresh.click(refreshModels, inputs=None, outputs=[modelP, modelD])
+        karras.click(toggleKarras, inputs=None, outputs=karras)
+        f16.click(toggleF16, inputs=None, outputs=f16)
         swapper.click(lambda w, h: (h, w), inputs=[width, height], outputs=[width, height], show_progress=False)
-        random.click(lambda : -1, inputs=[], outputs=sampling_seed, show_progress=False)
+        random.click(lambda : -1, inputs=None, outputs=sampling_seed, show_progress=False)
         reuseSeed.click(reuseLastSeed, inputs=gallery_index, outputs=sampling_seed, show_progress=False)
 
         i2iFromGallery1.click (fn=i2iImageFromGallery, inputs=[output_gallery, gallery_index], outputs=[i2iSource1])
         i2iFromGallery2.click (fn=i2iImageFromGallery, inputs=[output_gallery, gallery_index], outputs=[i2iSource2])
         swapImages.click (fn=i2iSwap, inputs=[i2iSource1, i2iSource2], outputs=[i2iSource1, i2iSource2])
-        embed1State.click(fn=toggleE1, inputs=[], outputs=[embed1State], show_progress=False)
-        embed2State.click(fn=toggleE2, inputs=[], outputs=[embed2State], show_progress=False)
+        embed1State.click(fn=toggleE1, inputs=None, outputs=[embed1State], show_progress=False)
+        embed2State.click(fn=toggleE2, inputs=None, outputs=[embed2State], show_progress=False)
 
         output_gallery.select(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
 
-        generate_button.click(toggleGenerate, inputs=[], outputs=[generate_button, SP]).then(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button).then(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
+        generate_button.click(toggleGenerate, inputs=None, outputs=[generate_button, SP]).then(predict, inputs=ctrls, outputs=[generate_button, SP, output_gallery]).then(fn=lambda: gradio.update(value='Generate', variant='primary', interactive=True), inputs=None, outputs=generate_button).then(fn=getGalleryIndex, js="selected_gallery_index", inputs=gallery_index, outputs=gallery_index).then(fn=getGalleryText, inputs=[output_gallery, gallery_index], outputs=[infotext])
     return [(stable_cascade_block, "StableCascade", "stable_cascade_DoE")]
 
 script_callbacks.on_ui_tabs(on_ui_tabs)
